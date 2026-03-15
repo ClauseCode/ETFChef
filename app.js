@@ -384,15 +384,21 @@ addPositionBtn.addEventListener('click', addPosition);
 clearAllBtn.addEventListener('click', clearAll);
 addPosition();
 
-// ── Price fetch (Yahoo Finance via CORS proxy — no API key) ─
-const YF_PROXY = 'https://corsproxy.io/?';
-const YF_BASE  = 'https://query1.finance.yahoo.com/v8/finance/chart/';
+// ── Price fetch (Yahoo Finance) ─────────────────────────────
+// Production: Netlify serverless function (server-to-server, no CORS issues)
+// Local dev:  corsproxy.io CORS proxy fallback
+const YF_BASE    = 'https://query1.finance.yahoo.com/v8/finance/chart/';
+const YF_PROXY   = 'https://corsproxy.io/?';
+const isLocalDev = ['localhost', '127.0.0.1'].includes(location.hostname) || location.protocol === 'file:';
 
 async function fetchPrice(ticker) {
   if (priceCache[ticker] !== undefined) return priceCache[ticker];
   try {
     const yfUrl = `${YF_BASE}${encodeURIComponent(ticker)}?interval=1d&range=1d`;
-    const res   = await fetch(YF_PROXY + yfUrl);
+    const fetchUrl = isLocalDev
+      ? YF_PROXY + encodeURIComponent(yfUrl)
+      : `/.netlify/functions/price?ticker=${encodeURIComponent(ticker)}`;
+    const res   = await fetch(fetchUrl);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data  = await res.json();
     const price = data?.chart?.result?.[0]?.meta?.regularMarketPrice || null;
