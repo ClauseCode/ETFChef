@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ETFChef</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>
+        <img src="ETFChef-Logo.png" class="logo-img" alt="ETFChef logo" aria-hidden="true" />
+        ETFChef
+      </h1>
+      <p class="subtitle">Optimize ETF exposures without trading single name equities</p>
+    </header>
+
+    <nav class="tab-nav">
+      <button class="tab-btn active" data-tab="basket">Custom Basket Exposure</button>
+      <button class="tab-btn" data-tab="optimization">Exposure Optimization</button>
+    </nav>
+
+    <!-- ── Tab: Custom Basket Exposure ── -->
+    <div id="tab-basket" class="tab-panel">
+
+      <section class="api-key-section">
+        <label for="apiKey">Alpha Vantage API Key</label>
+        <div class="api-key-row">
+          <input type="password" id="apiKey" placeholder="Enter your Alpha Vantage API key" autocomplete="off" />
+          <button id="saveApiKey" class="btn btn-secondary">Save</button>
+        </div>
+        <p class="hint">Free API key at <a href="https://www.alphavantage.co/support/#api-key" target="_blank" rel="noopener">alphavantage.co</a> · 25 calls/day on free tier</p>
+      </section>
+
+      <section class="cache-section">
+        <div class="section-header">
+          <div class="cache-title-group">
+            <h2>Holdings Cache</h2>
+            <span class="cache-badge" id="cacheBadge">0 ETFs</span>
+          </div>
+          <div class="cache-btns">
+            <button id="exportCache" class="btn btn-secondary btn-sm">↓ Export</button>
+            <label class="btn btn-secondary btn-sm" for="importCacheInput">↑ Import<input type="file" id="importCacheInput" accept=".json" /></label>
+            <button id="toggleCachePanel" class="btn btn-ghost btn-sm">Show ▾</button>
+          </div>
+        </div>
+        <div id="cachePanel" class="cache-panel hidden"></div>
+      </section>
+
+      <section class="positions-section">
+        <div class="section-header">
+          <h2>Positions</h2>
+          <button id="addPosition" class="btn btn-primary">+ Add Position</button>
+        </div>
+
+        <div id="positionsList" class="positions-list">
+          <!-- Positions will be added here -->
+        </div>
+
+        <div class="actions">
+          <button id="calculate" class="btn btn-accent">Calculate Exposure</button>
+          <button id="clearAll" class="btn btn-ghost">Clear All</button>
+        </div>
+      </section>
+
+      <section id="resultsSection" class="results-section hidden">
+        <div class="section-header">
+          <h2>Net Exposure</h2>
+          <div class="results-meta" id="resultsMeta"></div>
+        </div>
+
+        <div class="summary-cards" id="summaryCards"></div>
+
+        <div class="filter-row">
+          <div class="filter-tabs">
+            <button class="filter-tab active" data-filter="all">All</button>
+            <button class="filter-tab" data-filter="long">Long</button>
+            <button class="filter-tab" data-filter="short">Short</button>
+          </div>
+          <input type="text" id="stockSearch" class="search-input" placeholder="Search ticker or name…" />
+        </div>
+
+        <div id="resultsChart" class="exp-chart results-chart"></div>
+      </section>
+
+    </div><!-- /#tab-basket -->
+
+    <!-- ── Tab: Exposure Optimization ── -->
+    <div id="tab-optimization" class="tab-panel hidden">
+
+      <!-- Available ETFs from cache -->
+      <section class="opt-section">
+        <div class="section-header">
+          <div class="cache-title-group">
+            <h2>Available ETFs</h2>
+            <span class="cache-badge" id="optCacheBadge">0 ETFs</span>
+          </div>
+          <span class="hint" style="margin:0">Click to include / exclude from optimization</span>
+        </div>
+        <div id="optEtfList" class="opt-etf-list">
+          <p class="empty-state">No ETFs cached yet. Add holdings via the Custom Basket Exposure tab.</p>
+        </div>
+      </section>
+
+      <!-- Parameters -->
+      <section class="opt-section">
+        <h2>Parameters</h2>
+        <div class="opt-params">
+          <div class="opt-param-group">
+            <label for="optTarget">Target Ticker</label>
+            <input type="text" id="optTarget" placeholder="e.g. AAPL" maxlength="10" autocomplete="off" />
+            <span class="hint">Maximize exposure to this stock</span>
+          </div>
+          <div class="opt-param-group">
+            <label for="optMaxExp">Max Other Exposure</label>
+            <div class="input-suffix-wrap">
+              <input type="number" id="optMaxExp" value="100" min="0.1" max="100" step="0.1" />
+              <span class="input-suffix">%</span>
+            </div>
+            <span class="hint">Cap per non-target stock</span>
+          </div>
+          <div class="opt-param-group">
+            <label for="optMaxLegs">Max Legs</label>
+            <input type="number" id="optMaxLegs" value="4" min="1" max="10" step="1" />
+            <span class="hint">Max number of ETF positions</span>
+          </div>
+          <div class="opt-param-group">
+            <label for="optPortfolio">Portfolio Size</label>
+            <div class="input-suffix-wrap input-prefix-wrap">
+              <span class="input-prefix">$</span>
+              <input type="number" id="optPortfolio" value="100000" min="1" step="1000" style="padding-left:1.6rem" />
+            </div>
+            <span class="hint">Total capital to allocate</span>
+          </div>
+        </div>
+        <div class="opt-checkbox-row">
+          <label class="checkbox-label">
+            <input type="checkbox" id="optRequireMax" checked />
+            <span>Target must be the largest exposure</span>
+          </label>
+        </div>
+        <div class="opt-radio-group">
+          <label class="radio-label">
+            <input type="radio" name="optMode" value="absolute" checked />
+            <span>Maximize absolute exposure</span>
+          </label>
+          <label class="radio-label">
+            <input type="radio" name="optMode" value="relative" />
+            <span>Maximize exposure relative to other holdings</span>
+          </label>
+        </div>
+        <div id="optTickerCaps" class="opt-ticker-caps"></div>
+        <div class="actions">
+          <button id="optRun" class="btn btn-accent">Find Optimal Portfolio</button>
+        </div>
+      </section>
+
+      <div id="optError" class="error-banner hidden"></div>
+
+      <!-- Results -->
+      <section id="optResults" class="opt-section hidden">
+        <h2>Optimal Portfolio</h2>
+        <div id="optResultsContent"></div>
+      </section>
+
+    </div><!-- /#tab-optimization -->
+
+    <div id="successBanner" class="success-banner hidden"></div>
+    <div id="errorBanner" class="error-banner hidden"></div>
+    <div id="loadingOverlay" class="loading-overlay hidden">
+      <div class="spinner"></div>
+      <p id="loadingMessage">Fetching holdings…</p>
+    </div>
+  </div>
+
+  <!-- Bar click popup -->
+  <div id="barPopup" class="bar-popup hidden">
+    <div class="bar-popup-header">
+      <div>
+        <span class="bar-popup-ticker" id="barPopupTicker"></span>
+        <span class="bar-popup-pct" id="barPopupPct"></span>
+      </div>
+      <button class="bar-popup-close" id="barPopupClose">✕</button>
+    </div>
+    <div class="bar-popup-body">
+      <button class="btn btn-secondary btn-sm bar-popup-btn" id="barPopupIncrease">↑ Increase exposure</button>
+      <div class="bar-popup-decrease-row">
+        <button class="btn btn-secondary btn-sm bar-popup-btn" id="barPopupDecrease">↓ Decrease — cap at</button>
+        <input type="number" id="barPopupCapInput" value="5" min="0.1" max="100" step="0.5" />
+        <span>%</span>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
