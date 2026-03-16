@@ -15,6 +15,7 @@ let nextId       = 1;
 const priceCache = {};
 let publicMode   = false;
 const tickerCaps = {}; // ticker → max absolute exposure fraction (per-stock override)
+let lastOptLegs  = null; // last optimization result legs for porting to Historical tab
 
 // ── DOM refs ───────────────────────────────────────────────
 const apiKeyInput       = document.getElementById('apiKey');
@@ -815,6 +816,9 @@ function renderOptResults(result, target, maxOtherPct, portfolio) {
   const k = result.legs.length;
   const legDollars = portfolio / k;
 
+  // Store for porting to Historical Spread tab
+  lastOptLegs = result.legs.map(l => ({ etf: l.etf, dir: l.dir > 0 ? 'long' : 'short', dollars: legDollars }));
+
   const legsHtml = result.legs.map(l => {
     const dir      = l.dir > 0 ? 'long' : 'short';
     const dirLabel = l.dir > 0 ? '↑ Long' : '↓ Short';
@@ -868,9 +872,41 @@ function renderOptResults(result, target, maxOtherPct, portfolio) {
       ${ratioLabel}
     </div>
     <p class="opt-constraint-note">${rows.length - 1} other stock${rows.length - 1 !== 1 ? 's' : ''} capped at ≤${maxOtherPct}% · ${result.legs.length} leg${result.legs.length !== 1 ? 's' : ''}</p>
-    <div class="exp-chart">${chartRows}</div>`;
+    <div class="exp-chart">${chartRows}</div>
+    <button class="btn btn-secondary" id="portToHistBtn" style="margin-top:1.25rem">→ Simulate in Historical Spread</button>`;
 
   document.getElementById('optResults').classList.remove('hidden');
+  document.getElementById('portToHistBtn').addEventListener('click', portOptToHistorical);
+}
+
+// ── Port optimization result to Historical Spread ──────────
+function portOptToHistorical() {
+  if (!lastOptLegs || lastOptLegs.length === 0) return;
+
+  // Clear existing hist legs from DOM and state
+  const list = document.getElementById('histLegsList');
+  list.innerHTML = '';
+  histLegs = [];
+  histNextId = 1;
+
+  // Add one row per optimized leg
+  lastOptLegs.forEach(l => {
+    const id = histNextId++;
+    histLegs.push({ id, ticker: l.etf, direction: l.dir, amount: Math.round(l.dollars) });
+    const row = createHistLegRow(id);
+    list.appendChild(row);
+    row.querySelector('.hist-leg-ticker').value = l.etf;
+    row.querySelector('.hist-leg-dir').value    = l.dir;
+    row.querySelector('.hist-leg-amount').value = Math.round(l.dollars);
+  });
+
+  // Switch to Historical Spread tab
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.add('hidden'));
+  const histBtn = document.querySelector('.tab-btn[data-tab="historical"]');
+  histBtn.classList.add('active');
+  document.getElementById('tab-historical').classList.remove('hidden');
+  histBtn.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 }
 
 // ── Per-ticker caps ────────────────────────────────────────
@@ -1002,6 +1038,330 @@ async function loadConfig() {
     renderCachePanel();
   } catch { /* config.json absent or bad JSON — remain in private mode */ }
 }
+
+// ── Historical Spread ───────────────────────────────────────
+let histLegs       = [];
+let histNextId     = 1;
+let histSeriesData = null; // cached for window resize redraws
+
+const HIST_COLORS = ['#3ecf8e','#f25c6e','#5b9cf6','#f7c059','#c17af6','#38bdf8','#f59e42','#e879f9'];
+
+function createHistLegRow(id) {
+  const row = document.createElement('div');
+  row.className = 'hist-leg-row';
+  row.dataset.legId = id;
+  row.innerHTML = `
+    <input type="text" class="hist-leg-ticker" placeholder="e.g. SPY" maxlength="10" autocomplete="off" />
+    <select class="hist-leg-dir">
+      <option value="long">↑ Long</option>
+      <option value="short">↓ Short</option>
+    </select>
+    <div class="input-prefix-wrap">
+      <span class="input-prefix">$</span>
+      <input type="number" class="hist-leg-amount" placeholder="Amount" min="0" step="1000" style="padding-left:1.4rem" />
+    </div>
+    <button class="btn btn-remove" title="Remove">✕</button>
+  `;
+  const leg = histLegs.find(l => l.id === id);
+  row.querySelector('.hist-leg-ticker').addEventListener('input', e => {
+    e.target.value = e.target.value.toUpperCase();
+    if (leg) leg.ticker = e.target.value.trim();
+  });
+  row.querySelector('.hist-leg-dir').addEventListener('change', e => {
+    if (leg) leg.direction = e.target.value;
+  });
+  row.querySelector('.hist-leg-amount').addEventListener('input', e => {
+    if (leg) leg.amount = parseFloat(e.target.value) || 0;
+  });
+  row.querySelector('.btn-remove').addEventListener('click', () => {
+    histLegs = histLegs.filter(l => l.id !== id);
+    row.remove();
+  });
+  return row;
+}
+
+function addHistLeg() {
+  const id = histNextId++;
+  histLegs.push({ id, ticker: '', direction: 'long', amount: 10000 });
+  const row = createHistLegRow(id);
+  document.getElementById('histLegsList').appendChild(row);
+  row.querySelector('.hist-leg-amount').value = 10000;
+  row.querySelector('.hist-leg-ticker').focus();
+}
+
+// Default date range: last 1 year
+(function setHistDates() {
+  const today = new Date();
+  const start = new Date(today);
+  start.setFullYear(today.getFullYear() - 1);
+  document.getElementById('histEnd').value   = today.toISOString().split('T')[0];
+  document.getElementById('histStart').value = start.toISOString().split('T')[0];
+})();
+
+async function fetchHistoricalPrices(ticker, startDate, endDate) {
+  const period1  = Math.floor(new Date(startDate).getTime() / 1000);
+  const period2  = Math.floor(new Date(endDate).getTime()   / 1000) + 86400;
+  const yfPath   = `${encodeURIComponent(ticker)}?interval=1d&period1=${period1}&period2=${period2}`;
+  const fetchUrl = isLocalDev
+    ? YF_PROXY + encodeURIComponent(YF_BASE + yfPath)
+    : `/.netlify/functions/history?ticker=${encodeURIComponent(ticker)}&period1=${period1}&period2=${period2}`;
+  const res = await fetch(fetchUrl);
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${ticker}`);
+  const data = await res.json();
+  const result = data?.chart?.result?.[0];
+  if (!result) throw new Error(`No data returned for ${ticker}`);
+  const ts = result.timestamp;
+  const cl = result.indicators.quote[0].close;
+  return ts
+    .map((t, i) => ({ date: new Date(t * 1000), close: cl[i] }))
+    .filter(d => d.close !== null && d.close !== undefined);
+}
+
+function alignSeries(allSeries) {
+  const sets   = allSeries.map(s => new Set(s.map(p => p.date.toISOString().split('T')[0])));
+  const common = [...sets[0]].filter(d => sets.every(set => set.has(d))).sort();
+  return allSeries.map(s => {
+    const m = {};
+    s.forEach(p => { m[p.date.toISOString().split('T')[0]] = p.close; });
+    return common.map(d => ({ date: new Date(d), close: m[d] }));
+  });
+}
+
+function drawHistChart(canvas, series, opts = {}) {
+  const dpr = window.devicePixelRatio || 1;
+  const W   = canvas.parentElement.offsetWidth || 800;
+  const H   = opts.height || 260;
+  canvas.style.width  = W + 'px';
+  canvas.style.height = H + 'px';
+  canvas.width  = W * dpr;
+  canvas.height = H * dpr;
+
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  const pad   = { top: 18, right: opts.showCallouts ? 58 : 16, bottom: 44, left: 62 };
+  const plotW = W - pad.left - pad.right;
+  const plotH = H - pad.top  - pad.bottom;
+
+  // Y range
+  const allY = series.flatMap(s => s.points.map(p => p.y));
+  let minY = Math.min(...allY), maxY = Math.max(...allY);
+  const ySpan = maxY - minY || 10;
+  minY -= ySpan * 0.06; maxY += ySpan * 0.06;
+
+  // X range
+  const allX = series[0].points.map(p => p.x);
+  const minX = allX[0], maxX = allX[allX.length - 1];
+  const xRange = maxX - minX || 1;
+
+  const xS = x => pad.left + ((x - minX) / xRange) * plotW;
+  const yS = y => pad.top  + plotH - ((y - minY) / (maxY - minY)) * plotH;
+
+  // Background
+  ctx.fillStyle = '#0a0a0a';
+  ctx.fillRect(0, 0, W, H);
+
+  // Y grid + labels
+  ctx.font = `10px 'SF Mono', Consolas, monospace`;
+  for (let i = 0; i <= 5; i++) {
+    const v = minY + (maxY - minY) * (i / 5);
+    const y = yS(v);
+    ctx.strokeStyle = 'rgba(255,255,255,0.04)';
+    ctx.lineWidth   = 1;
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(W - pad.right, y); ctx.stroke();
+    ctx.fillStyle  = 'rgba(255,255,255,0.28)';
+    ctx.textAlign  = 'right';
+    ctx.fillText(opts.yFormat ? opts.yFormat(v) : v.toFixed(1), pad.left - 5, y + 3.5);
+  }
+
+  // Baseline
+  if (opts.baseline !== undefined) {
+    const bY = yS(opts.baseline);
+    if (bY > pad.top && bY < pad.top + plotH) {
+      ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+      ctx.setLineDash([5, 4]);
+      ctx.lineWidth   = 1;
+      ctx.beginPath(); ctx.moveTo(pad.left, bY); ctx.lineTo(W - pad.right, bY); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  // X labels
+  ctx.fillStyle  = 'rgba(255,255,255,0.28)';
+  ctx.textAlign  = 'center';
+  ctx.font       = `10px 'SF Mono', Consolas, monospace`;
+  const nX = Math.min(7, allX.length);
+  for (let i = 0; i <= nX; i++) {
+    const idx = Math.round((allX.length - 1) * i / nX);
+    if (idx < 0 || idx >= allX.length) continue;
+    const d   = new Date(allX[idx]);
+    const lbl = `${d.getMonth()+1}/${d.getDate()}/${String(d.getFullYear()).slice(2)}`;
+    ctx.fillText(lbl, xS(allX[idx]), H - pad.bottom + 14);
+  }
+
+  // Lines
+  series.forEach(s => {
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth   = 2;
+    ctx.lineJoin    = 'round';
+    ctx.lineCap     = 'round';
+    ctx.beginPath();
+    s.points.forEach((p, i) => {
+      i === 0 ? ctx.moveTo(xS(p.x), yS(p.y)) : ctx.lineTo(xS(p.x), yS(p.y));
+    });
+    ctx.stroke();
+  });
+
+  // End-of-line callouts
+  if (opts.showCallouts) {
+    ctx.font      = `bold 10px 'SF Mono', Consolas, monospace`;
+    ctx.textAlign = 'left';
+    const callouts = series.map(s => {
+      const last  = s.points[s.points.length - 1];
+      const delta = opts.baseline !== undefined ? last.y - opts.baseline : last.y;
+      const label = (delta >= 0 ? '+' : '') + delta.toFixed(1) + '%';
+      return { s, x: xS(last.x) + 6, y: yS(last.y), label };
+    }).sort((a, b) => a.y - b.y);
+    // Nudge overlapping labels apart (min 13px gap)
+    for (let i = 1; i < callouts.length; i++) {
+      if (callouts[i].y - callouts[i - 1].y < 13) callouts[i].y = callouts[i - 1].y + 13;
+    }
+    callouts.forEach(c => {
+      ctx.fillStyle = c.s.color;
+      ctx.fillText(c.label, c.x, c.y + 3.5);
+    });
+  }
+
+  // Store metadata for tooltip
+  canvas._meta = { series, xS, yS, pad, allX, plotW, W, H, opts };
+}
+
+function setupHistTooltip(canvas, tooltipEl) {
+  canvas.addEventListener('mousemove', e => {
+    const m = canvas._meta;
+    if (!m) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx   = e.clientX - rect.left;
+    if (mx < m.pad.left || mx > m.W - m.pad.right) { tooltipEl.classList.add('hidden'); return; }
+    const frac = (mx - m.pad.left) / m.plotW;
+    const idx  = Math.max(0, Math.min(m.allX.length - 1, Math.round(frac * (m.allX.length - 1))));
+    const d    = new Date(m.allX[idx]);
+    const dateStr = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+    const rows = m.series.map(s => {
+      const v   = s.points[idx]?.y;
+      const val = v !== undefined ? (m.opts.yFormat ? m.opts.yFormat(v) : v.toFixed(2)) : '—';
+      return `<div class="hist-tip-row">
+        <span class="hist-tip-dot" style="background:${s.color}"></span>
+        <span class="hist-tip-lbl">${escHtml(s.label)}</span>
+        <span class="hist-tip-val">${escHtml(val)}</span>
+      </div>`;
+    }).join('');
+    tooltipEl.innerHTML = `<div class="hist-tip-date">${escHtml(dateStr)}</div>${rows}`;
+    tooltipEl.classList.remove('hidden');
+    const tW = tooltipEl.offsetWidth;
+    let left = mx + 14;
+    if (left + tW > m.W - 8) left = mx - tW - 14;
+    tooltipEl.style.left = left + 'px';
+    tooltipEl.style.top  = (m.pad.top + 8) + 'px';
+  });
+  canvas.addEventListener('mouseleave', () => tooltipEl.classList.add('hidden'));
+}
+
+function renderHistLegend(legendEl, series) {
+  legendEl.innerHTML = series.map(s =>
+    `<span class="hist-legend-chip">
+       <span class="hist-legend-dot" style="background:${s.color}"></span>
+       ${escHtml(s.label)}
+     </span>`
+  ).join('');
+}
+
+function renderHistCharts() {
+  if (!histSeriesData) return;
+  const { indexedSeries, portfolioSeries, totalInvested } = histSeriesData;
+
+  const c1 = document.getElementById('histChart1');
+  drawHistChart(c1, indexedSeries, { baseline: 100, height: 260, showCallouts: true });
+  setupHistTooltip(c1, document.getElementById('histTooltip1'));
+  renderHistLegend(document.getElementById('histLegend1'), indexedSeries);
+
+  const c2 = document.getElementById('histChart2');
+  drawHistChart(c2, portfolioSeries, {
+    baseline: 0,
+    height: 260,
+    showCallouts: true,
+    yFormat: v => (v >= 0 ? '+' : '') + v.toFixed(1) + '%'
+  });
+  setupHistTooltip(c2, document.getElementById('histTooltip2'));
+  renderHistLegend(document.getElementById('histLegend2'), portfolioSeries);
+}
+
+async function runHistSimulation() {
+  clearMessages();
+  const startDate = document.getElementById('histStart').value;
+  const endDate   = document.getElementById('histEnd').value;
+  if (!startDate || !endDate)                           { showError('Select start and end dates.');            return; }
+  if (new Date(startDate) >= new Date(endDate))         { showError('Start must be before end date.');         return; }
+  const validLegs = histLegs.filter(l => l.ticker && l.amount > 0);
+  if (!validLegs.length)                                { showError('Add at least one leg with a ticker and dollar amount.'); return; }
+
+  showLoading('Fetching historical prices…');
+  try {
+    const rawSeries = [];
+    for (const leg of validLegs) {
+      updateLoadingMessage(`Fetching ${leg.ticker}…`);
+      const prices = await fetchHistoricalPrices(leg.ticker, startDate, endDate);
+      if (prices.length < 2) throw new Error(`Not enough price data returned for ${leg.ticker}`);
+      rawSeries.push(prices);
+    }
+
+    const aligned = alignSeries(rawSeries);
+    if (!aligned[0].length) throw new Error('No overlapping trading days found across the selected tickers and date range.');
+
+    // Chart 1: raw ETF price performance indexed to 100 (direction-agnostic)
+    const indexedSeries = validLegs.map((leg, i) => {
+      const prices = aligned[i], base = prices[0].close;
+      return {
+        label:  `${leg.direction === 'short' ? '↓' : '↑'} ${leg.ticker}`,
+        color:  HIST_COLORS[i % HIST_COLORS.length],
+        points: prices.map(p => ({ x: p.date.getTime(), y: 100 + ((p.close / base) - 1) * 100 }))
+      };
+    });
+
+    // Chart 2: aggregate portfolio $ value
+    const nDays    = aligned[0].length;
+    const aggPts   = [];
+    for (let j = 0; j < nDays; j++) {
+      let total = 0;
+      validLegs.forEach((leg, i) => {
+        const base = aligned[i][0].close;
+        const mult = leg.direction === 'short' ? -1 : 1;
+        total += leg.amount * (1 + mult * ((aligned[i][j].close / base) - 1));
+      });
+      aggPts.push({ x: aligned[0][j].date.getTime(), y: total });
+    }
+    const totalInvested = validLegs.reduce((s, l) => s + l.amount, 0);
+    const pctPts    = aggPts.map(p => ({ x: p.x, y: ((p.y / totalInvested) - 1) * 100 }));
+    const finalColor = pctPts[pctPts.length - 1].y >= 0 ? '#3ecf8e' : '#f25c6e';
+    const portfolioSeries = [{ label: 'Portfolio', color: finalColor, points: pctPts }];
+
+    hideLoading();
+    histSeriesData = { indexedSeries, portfolioSeries, totalInvested };
+    document.getElementById('histResults').classList.remove('hidden');
+    renderHistCharts();
+  } catch (err) {
+    hideLoading();
+    showError(`Error: ${err.message}`);
+  }
+}
+
+document.getElementById('histAddLeg').addEventListener('click', addHistLeg);
+document.getElementById('histRun').addEventListener('click', runHistSimulation);
+window.addEventListener('resize', () => { if (histSeriesData) renderHistCharts(); });
+
+// Start with 2 default legs
+addHistLeg();
+addHistLeg();
 
 // ── Init ───────────────────────────────────────────────────
 renderCachePanel();

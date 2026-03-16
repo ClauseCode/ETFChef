@@ -19,6 +19,7 @@
     <nav class="tab-nav">
       <button class="tab-btn active" data-tab="basket">Custom Basket Exposure</button>
       <button class="tab-btn" data-tab="optimization">Exposure Optimization</button>
+      <button class="tab-btn" data-tab="historical">Historical Spread</button>
     </nav>
 
     <!-- ── Tab: Custom Basket Exposure ── -->
@@ -165,6 +166,56 @@
       </section>
 
     </div><!-- /#tab-optimization -->
+
+    <!-- ── Tab: Historical Spread ── -->
+    <div id="tab-historical" class="tab-panel hidden">
+
+      <!-- Legs -->
+      <section class="opt-section">
+        <div class="section-header">
+          <h2>Positions</h2>
+          <button class="btn btn-primary btn-sm" id="histAddLeg">+ Add Leg</button>
+        </div>
+        <div id="histLegsList" class="hist-legs-list"></div>
+      </section>
+
+      <!-- Date range -->
+      <section class="opt-section">
+        <h2>Date Range</h2>
+        <div class="hist-params-row">
+          <div class="hist-date-group">
+            <label>Start Date</label>
+            <input type="date" id="histStart" />
+          </div>
+          <div class="hist-date-group">
+            <label>End Date</label>
+            <input type="date" id="histEnd" />
+          </div>
+          <button class="btn btn-accent" id="histRun">▶ Run Simulation</button>
+        </div>
+      </section>
+
+      <!-- Results -->
+      <div id="histResults" class="hidden">
+        <section class="opt-section">
+          <h2>Individual Leg Performance (Indexed to 100)</h2>
+          <div class="hist-chart-wrap">
+            <canvas id="histChart1"></canvas>
+            <div id="histTooltip1" class="hist-tooltip hidden"></div>
+          </div>
+          <div id="histLegend1" class="hist-legend"></div>
+        </section>
+        <section class="opt-section">
+          <h2>Combined Portfolio Value</h2>
+          <div class="hist-chart-wrap">
+            <canvas id="histChart2"></canvas>
+            <div id="histTooltip2" class="hist-tooltip hidden"></div>
+          </div>
+          <div id="histLegend2" class="hist-legend"></div>
+        </section>
+      </div>
+
+    </div><!-- /#tab-historical -->
 
     <div id="successBanner" class="success-banner hidden"></div>
     <div id="errorBanner" class="error-banner hidden"></div>

@@ -133,6 +133,7 @@ section {
 input[type="text"],
 input[type="number"],
 input[type="password"],
+input[type="date"],
 select {
   background: var(--bg);
   border: 1px solid var(--border);
@@ -148,6 +149,7 @@ select {
 input[type="text"]:focus,
 input[type="number"]:focus,
 input[type="password"]:focus,
+input[type="date"]:focus,
 select:focus {
   border-color: var(--accent);
 }
@@ -1074,6 +1076,145 @@ td:first-child { color: var(--muted); font-size: 0.8rem; }
 
 #optResultsContent .exp-bar-row:hover {
   background: var(--surface2);
+}
+
+/* ── Historical Spread ─────────────────────────────────────── */
+.hist-legs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+.hist-leg-row {
+  display: grid;
+  grid-template-columns: 1fr 95px 140px auto;
+  gap: 0.6rem;
+  align-items: center;
+  background: var(--surface2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 0.65rem 1rem;
+}
+
+.hist-leg-row .hist-leg-ticker {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.hist-params-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 1.25rem;
+  flex-wrap: wrap;
+  margin-top: 0.5rem;
+}
+
+.hist-date-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.hist-date-group label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.hist-date-group input[type="date"] {
+  width: 150px;
+  color-scheme: dark;
+}
+
+/* Chart container */
+.hist-chart-wrap {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  border-radius: 6px;
+  margin-top: 0.75rem;
+}
+
+.hist-chart-wrap canvas {
+  display: block;
+  width: 100%;
+  cursor: crosshair;
+}
+
+/* Legend */
+.hist-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 0.65rem;
+}
+
+.hist-legend-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.78rem;
+  font-family: 'SF Mono', Consolas, monospace;
+  color: var(--muted);
+}
+
+.hist-legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+/* Tooltip */
+.hist-tooltip {
+  position: absolute;
+  background: #1c1c1c;
+  border: 1px solid #303030;
+  border-radius: 6px;
+  padding: 0.5rem 0.7rem;
+  pointer-events: none;
+  z-index: 20;
+  min-width: 140px;
+  box-shadow: 0 4px 20px rgba(0,0,0,0.55);
+}
+
+.hist-tip-date {
+  font-size: 0.7rem;
+  color: rgba(255,255,255,0.38);
+  margin-bottom: 0.4rem;
+  font-family: 'SF Mono', Consolas, monospace;
+}
+
+.hist-tip-row {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  margin-bottom: 0.18rem;
+}
+
+.hist-tip-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.hist-tip-lbl {
+  flex: 1;
+  font-size: 0.72rem;
+  font-family: 'SF Mono', Consolas, monospace;
+  color: rgba(255,255,255,0.5);
+}
+
+.hist-tip-val {
+  font-size: 0.78rem;
+  font-family: 'SF Mono', Consolas, monospace;
+  font-weight: 600;
+  color: var(--text);
 }
 
 /* ── Responsive ───────────────────────────────────────────── */
