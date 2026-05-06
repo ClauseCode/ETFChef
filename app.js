@@ -58,9 +58,28 @@ saveApiKeyBtn.addEventListener('click', () => {
 // ── Holdings cache ─────────────────────────────────────────
 function cacheKey(ticker)      { return CACHE_PREFIX + ticker.toUpperCase(); }
 function isFresh(entry)        { return entry && (Date.now() - new Date(entry.fetchedAt).getTime()) < CACHE_TTL_MS; }
+
+// Normalize holdings from raw AV format {symbol, description, weight}
+// to the processed format {asset, name, weightPercentage} the rest of the
+// code depends on.  The bundled holdings-cache.json stores raw AV format,
+// so this must be called whenever holdings are read back from localStorage.
+function normalizeHoldings(holdings) {
+  if (!Array.isArray(holdings) || !holdings.length) return holdings;
+  if (holdings[0].asset !== undefined) return holdings; // already processed
+  return holdings.map(h => ({
+    asset:            (h.symbol || '').toUpperCase(),
+    name:             h.description || '',
+    weightPercentage: (parseFloat(h.weight) || 0) * 100,
+  }));
+}
+
 function getCached(ticker)     {
-  try   { return JSON.parse(localStorage.getItem(cacheKey(ticker))); }
-  catch { return null; }
+  try {
+    const entry = JSON.parse(localStorage.getItem(cacheKey(ticker)));
+    if (!entry) return null;
+    if (entry.holdings) entry.holdings = normalizeHoldings(entry.holdings);
+    return entry;
+  } catch { return null; }
 }
 function setCached(ticker, holdings) {
   localStorage.setItem(cacheKey(ticker), JSON.stringify({ holdings, fetchedAt: new Date().toISOString() }));
@@ -1005,7 +1024,10 @@ async function loadBundledCache() {
       const existing = getCached(ticker);
       // Only seed if visitor has no entry, or bundled data is newer
       if (!existing || new Date(entry.fetchedAt) > new Date(existing.fetchedAt)) {
-        localStorage.setItem(cacheKey(ticker), JSON.stringify(entry));
+        // Normalize to processed format before storing so all code paths
+        // receive {asset, name, weightPercentage} regardless of source.
+        const normalized = { holdings: normalizeHoldings(entry.holdings), fetchedAt: entry.fetchedAt };
+        localStorage.setItem(cacheKey(ticker), JSON.stringify(normalized));
         loaded++;
       }
     }
