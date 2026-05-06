@@ -656,6 +656,7 @@ calculateBtn.addEventListener('click', async () => {
       showSuccess(`${fetchedCount > 0 ? `Fetched ${fetchedCount} ETF${fetchedCount !== 1 ? 's' : ''} from API · ` : ''}${cachedCount > 0 ? `${cachedCount} from cache · ` : ''}${fetchedCount} API call${fetchedCount !== 1 ? 's' : ''} used today.`);
 
     renderResults(exposure);
+    renderNaNotice(document.getElementById('basketNaNotice'), uniqueTickers);
 
   } catch (err) {
     hideLoading();
@@ -723,6 +724,42 @@ function renderOptEtfList() {
       else                         { optSelectedEtfs.add(t);    chip.classList.add('selected');    }
     });
   });
+
+  renderNaNotice(document.getElementById('optNaNotice'), tickers);
+}
+
+// ── N/A holdings notice ────────────────────────────────────
+// Returns ETFs (from the given list) that contain holdings with no US
+// ticker symbol (symbol = "n/a" in raw AV data → asset = "N/A" after
+// normalization), along with the total excluded weight.
+function getNaExcludedInfo(etfList) {
+  const affected = [];
+  for (const ticker of etfList) {
+    const entry = getCached(ticker);
+    if (!entry?.holdings) continue;
+    const naEntries = entry.holdings.filter(h => h.asset === 'N/A' && h.weightPercentage > 0);
+    if (!naEntries.length) continue;
+    const totalWeight = naEntries.reduce((s, h) => s + h.weightPercentage, 0);
+    affected.push({ ticker, entries: naEntries, totalWeight });
+  }
+  return affected.sort((a, b) => b.totalWeight - a.totalWeight);
+}
+
+function renderNaNotice(containerEl, etfList) {
+  if (!containerEl) return;
+  const affected = getNaExcludedInfo(etfList || []);
+  if (!affected.length) { containerEl.classList.add('hidden'); return; }
+
+  const lines = affected.map(({ ticker, entries, totalWeight }) => {
+    const detail = entries.map(e => `${escHtml(e.name)} ${e.weightPercentage.toFixed(2)}%`).join(', ');
+    return `<li><strong>${escHtml(ticker)}</strong> — ${totalWeight.toFixed(2)}% excluded (${detail})</li>`;
+  }).join('');
+
+  containerEl.innerHTML = `
+    <div class="na-notice-title">⚠ International &amp; non-equity holdings excluded</div>
+    The following ETFs contain holdings without a US ticker symbol that are not incorporated into calculations:
+    <ul>${lines}</ul>`;
+  containerEl.classList.remove('hidden');
 }
 
 // Generate all k-combinations from array

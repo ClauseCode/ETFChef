@@ -1243,3 +1243,30 @@ td:first-child { color: var(--muted); font-size: 0.8rem; }
     width: 100%;
   }
 }
+
+/* ── N/A holdings notice ───────────────────────────────────── */
+.na-notice {
+  margin-top: 0.75rem;
+  padding: 0.6rem 0.85rem;
+  background: rgba(247, 192, 89, 0.06);
+  border: 1px solid rgba(247, 192, 89, 0.22);
+  border-radius: 6px;
+  font-size: 0.78rem;
+  color: rgba(232, 234, 240, 0.6);
+  line-height: 1.55;
+}
+.na-notice-title {
+  color: #f7c059;
+  font-weight: 600;
+  margin-bottom: 0.3rem;
+}
+.na-notice ul {
+  margin: 0.3rem 0 0 1.1rem;
+  padding: 0;
+}
+.na-notice li {
+  margin-bottom: 0.15rem;
+}
+.na-notice strong {
+  color: rgba(232, 234, 240, 0.85);
+}
