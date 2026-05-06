@@ -482,7 +482,7 @@ function calcExposure(holdingsMap, positions) {
     const etfPrice = pos.price ?? priceCache[etf] ?? 0;
     for (const h of holdingsMap[etf]) {
       const underlying = (h.asset || '').toUpperCase();
-      if (!underlying) continue;
+      if (!underlying || underlying === 'N/A') continue; // skip non-tradeable / no-symbol entries
       const weight       = parseFloat(h.weightPercentage) || 0;
       const contribution = mult * shares * etfPrice * (weight / 100);
       if (!exposure[underlying]) exposure[underlying] = { name: h.name || '', netDollars: 0, sources: [] };
@@ -786,7 +786,7 @@ function runOptimization() {
         for (let i = 0; i < k; i++) {
           for (const h of holdingsMap[combo[i]]) {
             const s = h.asset.toUpperCase();
-            if (!s) continue;
+            if (!s || s === 'N/A') continue; // skip non-tradeable / no-symbol entries
             exp[s] = (exp[s] || 0) + dirs[i] * (h.weightPercentage / 100) / k;
           }
         }
