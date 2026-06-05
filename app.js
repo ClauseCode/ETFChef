@@ -453,12 +453,24 @@ async function fetchHoldings(ticker, apiKey, forceRefresh = false) {
   }
 
   const url  = `${API_BASE}?function=ETF_PROFILE&symbol=${encodeURIComponent(ticker)}&apikey=${encodeURIComponent(apiKey)}`;
-  const res  = await fetch(url);
-  if (!res.ok) throw new Error(`HTTP ${res.status} for ${ticker}`);
+  let res;
+  try {
+    res = await fetch(url);
+    if (!res.ok) throw new Error(`HTTP ${res.status} for ${ticker}`);
+  } catch (err) {
+    // Network / HTTP failure — fall back to stale cache rather than losing data entirely
+    const stale = getCached(ticker);
+    if (stale?.holdings?.length) return stale.holdings;
+    throw err;
+  }
   const data = await res.json();
 
-  if (data['Error Message']) throw new Error(data['Error Message']);
-  if (data['Information'])   throw new Error(data['Information']);
+  if (data['Error Message'] || data['Information']) {
+    // API-level error (rate limit, bad key, etc.) — fall back to stale cache
+    const stale = getCached(ticker);
+    if (stale?.holdings?.length) return stale.holdings;
+    throw new Error(data['Error Message'] || data['Information']);
+  }
   if (!data.holdings || !Array.isArray(data.holdings))
     throw new Error(`No holdings data returned for ${ticker}`);
 
@@ -583,19 +595,22 @@ calculateBtn.addEventListener('click', async () => {
 
   const uniqueTickers = [...new Set(validPositions.map(p => p.ticker))];
 
-  // Split into cached vs needs-fetch
-  const toFetch  = uniqueTickers.filter(t => { const c = getCached(t); return !c || !isFresh(c); });
+  // Split into three buckets: no data at all / stale (usable) / fresh
+  const missing   = uniqueTickers.filter(t => !getCached(t));
+  const stale     = uniqueTickers.filter(t => { const c = getCached(t); return c && !isFresh(c); });
   const fromCache = uniqueTickers.filter(t => { const c = getCached(t); return c && isFresh(c); });
+  const toFetch   = missing; // stale data is still usable; only truly missing needs an API call
 
-  if (publicMode && toFetch.length > 0) {
-    showError(`Holdings data not available for: ${toFetch.join(', ')}.\nThis site uses pre-loaded ETF data. Only the ETFs listed in the cache panel are supported.`);
+  if (publicMode && missing.length > 0) {
+    showError(`Holdings data not available for: ${missing.join(', ')}.\nThis site uses pre-loaded ETF data. Only the ETFs listed in the cache panel are supported.`);
     return;
   }
 
+  const staleNote = stale.length > 0 ? ` · ${stale.join(', ')} using cached data (>7 days old)` : '';
   if (toFetch.length === 0) {
-    showSuccess(`All ${uniqueTickers.length} ETF${uniqueTickers.length !== 1 ? 's' : ''} served from cache — 0 API calls used.`);
+    showSuccess(`All ${uniqueTickers.length} ETF${uniqueTickers.length !== 1 ? 's' : ''} served from cache — 0 API calls used.${staleNote}`);
   } else {
-    showLoading(`Fetching ${toFetch.join(', ')}… (${fromCache.length} from cache)`);
+    showLoading(`Fetching ${toFetch.join(', ')}… (${fromCache.length + stale.length} from cache)`);
   }
 
   try {
@@ -604,7 +619,8 @@ calculateBtn.addEventListener('click', async () => {
 
     for (const ticker of uniqueTickers) {
       const cached = getCached(ticker);
-      if (cached && isFresh(cached)) {
+      if (cached?.holdings?.length) {
+        // Use any cached data (fresh or stale) — avoids unnecessary API calls
         holdingsMap[ticker] = cached.holdings;
         continue;
       }
@@ -650,10 +666,10 @@ calculateBtn.addEventListener('click', async () => {
     if (emptyTickers.length > 0)
       showError(`No holdings found for: ${emptyTickers.join(', ')} — those positions were skipped.`);
 
-    const cachedCount  = fromCache.length;
+    const cachedCount  = fromCache.length + stale.length;
     const fetchedCount = toFetch.length - errors.length;
     if (toFetch.length > 0 && !errors.length)
-      showSuccess(`${fetchedCount > 0 ? `Fetched ${fetchedCount} ETF${fetchedCount !== 1 ? 's' : ''} from API · ` : ''}${cachedCount > 0 ? `${cachedCount} from cache · ` : ''}${fetchedCount} API call${fetchedCount !== 1 ? 's' : ''} used today.`);
+      showSuccess(`${fetchedCount > 0 ? `Fetched ${fetchedCount} ETF${fetchedCount !== 1 ? 's' : ''} from API · ` : ''}${cachedCount > 0 ? `${cachedCount} from cache · ` : ''}${fetchedCount} API call${fetchedCount !== 1 ? 's' : ''} used today.${staleNote}`);
 
     renderResults(exposure);
     renderNaNotice(document.getElementById('basketNaNotice'), uniqueTickers);
@@ -811,39 +827,82 @@ function runOptimization() {
   const cap = maxOtherPct / 100;
   let best = null, bestScore = -Infinity;
 
+  // ── Pre-compute typed arrays for fast inner-loop arithmetic ───────────
+  // JS dict hash-map ops are ~10× slower than typed-array indexing.
+  // Build a global ticker → integer index map, then store each ETF's
+  // holding weights as Float64Array.  The inner loop becomes pure array
+  // arithmetic and a single linear sweep for feasibility.
+  const tickerSet = new Set();
+  for (const etf of available) {
+    for (const h of holdingsMap[etf]) {
+      if (h.asset && h.asset !== 'N/A') tickerSet.add(h.asset);
+    }
+  }
+  const tickers   = [...tickerSet];
+  const tickerIdx = {};
+  tickers.forEach((t, i) => { tickerIdx[t] = i; });
+  const N         = tickers.length;
+  const targetI   = tickerIdx[target]; // integer index of target ticker
+
+  const etfVecs = {}; // etf → Float64Array(N) of (weight/100) values
+  for (const etf of available) {
+    const vec = new Float64Array(N);
+    for (const h of holdingsMap[etf]) {
+      const idx = tickerIdx[h.asset];
+      if (idx !== undefined) vec[idx] = h.weightPercentage / 100;
+    }
+    etfVecs[etf] = vec;
+  }
+
+  // ETFs that contain the target — every valid combo needs ≥1 of these
+  // in a *long* direction; otherwise targetExp ≤ 0 and we skip anyway.
+  const targetEtfs = new Set(available.filter(etf => etfVecs[etf][targetI] > 0));
+
+  // Reusable accumulation buffer (avoids allocating per iteration)
+  const expArr = new Float64Array(N);
+
   const kMax = Math.min(maxLegs, available.length);
   for (let k = 1; k <= kMax; k++) {
     for (const combo of combinations(available, k)) {
+      // Combo-level pre-filter: must include ≥1 ETF that has the target
+      if (!combo.some(etf => targetEtfs.has(etf))) continue;
+
       const totalDirs = 1 << k;
       for (let mask = 0; mask < totalDirs; mask++) {
-        const dirs = combo.map((_, i) => ((mask >> i) & 1) ? 1 : -1);
-
-        // Equal-weighted: each leg contributes 1/k
-        const exp = {};
+        // Direction-level pre-filter: at least one targetEtf must be long
+        let hasLongTarget = false;
         for (let i = 0; i < k; i++) {
-          for (const h of holdingsMap[combo[i]]) {
-            const s = h.asset.toUpperCase();
-            if (!s || s === 'N/A') continue; // skip non-tradeable / no-symbol entries
-            exp[s] = (exp[s] || 0) + dirs[i] * (h.weightPercentage / 100) / k;
-          }
+          if (targetEtfs.has(combo[i]) && ((mask >> i) & 1)) { hasLongTarget = true; break; }
+        }
+        if (!hasLongTarget) continue;
+
+        // Build exposure vector via typed-array accumulation
+        expArr.fill(0);
+        for (let i = 0; i < k; i++) {
+          const scalar = ((mask >> i) & 1) ? (1 / k) : -(1 / k);
+          const vec    = etfVecs[combo[i]];
+          for (let j = 0; j < N; j++) expArr[j] += scalar * vec[j];
         }
 
-        const targetExp = exp[target] || 0;
-        if (targetExp <= 0) continue; // target must be positive
-        if (optimizeMode === 'absolute' && targetExp <= bestScore) continue; // prune for absolute mode
+        const targetExp = expArr[targetI];
+        if (targetExp <= 0) continue;
+        if (optimizeMode === 'absolute' && targetExp <= bestScore) continue;
 
-        let feasible = true;
-        for (const [s, v] of Object.entries(exp)) {
-          if (s === target) continue;
-          if (Math.abs(v) > cap + 1e-9) { feasible = false; break; }
-          if (requireMaxExp && Math.abs(v) > targetExp + 1e-9) { feasible = false; break; }
-          if (tickerCaps[s] !== undefined && Math.abs(v) > tickerCaps[s] + 1e-9) { feasible = false; break; }
+        // Feasibility sweep — single pass, track maxOther inline
+        let feasible = true, maxOther = 0;
+        for (let j = 0; j < N; j++) {
+          if (j === targetI) continue;
+          const absV = Math.abs(expArr[j]);
+          if (absV > cap + 1e-9) { feasible = false; break; }
+          if (requireMaxExp && absV > targetExp + 1e-9) { feasible = false; break; }
+          const t = tickers[j];
+          if (tickerCaps[t] !== undefined && absV > tickerCaps[t] + 1e-9) { feasible = false; break; }
+          if (absV > maxOther) maxOther = absV;
         }
 
         if (feasible) {
           let score, ratio;
           if (optimizeMode === 'relative') {
-            const maxOther = Math.max(0, ...Object.entries(exp).filter(([s]) => s !== target).map(([, v]) => Math.abs(v)));
             ratio = maxOther > 1e-9 ? targetExp / maxOther : Infinity;
             score = maxOther > 1e-9 ? targetExp / maxOther : 1e9;
           } else {
@@ -852,7 +911,12 @@ function runOptimization() {
           }
           if (score > bestScore) {
             bestScore = score;
-            best = { legs: combo.map((etf, i) => ({ etf, dir: dirs[i] })), exp, targetExp, ratio };
+            // Convert typed array back to plain object for rendering
+            const exp = {};
+            for (let j = 0; j < N; j++) {
+              if (Math.abs(expArr[j]) > 1e-9) exp[tickers[j]] = expArr[j];
+            }
+            best = { legs: combo.map((etf, i) => ({ etf, dir: ((mask >> i) & 1) ? 1 : -1 })), exp, targetExp, ratio };
           }
         }
       }
