@@ -2,16 +2,18 @@
 """
 Refresh ETF holdings cache from provider websites.
 
-Run manually:   python scripts/refresh_holdings.py
+Run manually:   ALPHA_VANTAGE_KEY=<key> python scripts/refresh_holdings.py
 GitHub Actions: triggered weekly; ALPHA_VANTAGE_KEY set as repo secret
 
 Providers
 ---------
-ssga          State Street SPDR XLSX  (SPY, XL* sector ETFs)
-ark           ARK Invest CSV          (ARKK, ARKW, ARKG, ARKF, ARKQ)
-alphavantage  Alpha Vantage API       (everything else; 25 calls/day free)
+etf_scraper   etf-scraper library — covers iShares, SSGA/SPDR, Vanguard, Invesco
+              Uses headless Chromium when needed (iShares bot-detection bypass)
+ark           ARK Invest public CSV — no auth, no browser
+alphavantage  Alpha Vantage ETF_PROFILE API — fallback for niche ETFs not covered
+              by the above (25 calls/day on free tier)
 
-To add a new ETF, add one line to ETF_CONFIG below.
+To add a new ETF, add one line to ETF_CONFIG below and pick a provider.
 """
 
 import csv
@@ -23,8 +25,9 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-import openpyxl
+import pandas as pd
 import requests
+from etf_scraper import ETFScraper
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
@@ -32,43 +35,96 @@ CACHE_FILE = Path(__file__).parent.parent / "holdings-cache.json"
 AV_KEY     = os.environ.get("ALPHA_VANTAGE_KEY", "")
 UA         = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-# Add or remove ETFs here — pick ssga / ark / alphavantage as the provider.
+# ── ETF list ─────────────────────────────────────────────────────────────────
+# Providers: etf_scraper | ark | alphavantage
+# Add a new ETF by inserting one line here.
+
 ETF_CONFIG = {
-    # SSGA / SPDR — direct XLSX, no API key needed
-    "SPY":  "ssga",
-    "XLB":  "ssga",
-    "XLC":  "ssga",
-    "XLE":  "ssga",
-    "XLF":  "ssga",
-    "XLI":  "ssga",
-    "XLK":  "ssga",
-    "XLP":  "ssga",
-    "XLRE": "ssga",
-    "XLU":  "ssga",
-    "XLY":  "ssga",
-    "XRT":  "ssga",
-    # ARK Invest — direct CSV, no API key needed
-    "ARKK": "ark",
-    "ARKW": "ark",
-    "ARKG": "ark",
-    "ARKF": "ark",
-    "ARKQ": "ark",
-    # Alpha Vantage — needs ALPHA_VANTAGE_KEY (25 calls/day on free tier)
+
+    # ── iShares (BlackRock) ───────────────────────────────────────────────────
+    "IVV":  "etf_scraper",   # iShares Core S&P 500
+    "IJH":  "etf_scraper",   # iShares Core S&P Mid-Cap
+    "IJR":  "etf_scraper",   # iShares Core S&P Small-Cap
+    "IWM":  "etf_scraper",   # iShares Russell 2000
+    "IWB":  "etf_scraper",   # iShares Russell 1000
+    "IWF":  "etf_scraper",   # iShares Russell 1000 Growth
+    "IWD":  "etf_scraper",   # iShares Russell 1000 Value
+    "EFA":  "etf_scraper",   # iShares MSCI EAFE
+    "EEM":  "etf_scraper",   # iShares MSCI Emerging Markets
+    "IEMG": "etf_scraper",   # iShares Core MSCI Emerging Markets
+    "AGG":  "etf_scraper",   # iShares Core US Aggregate Bond
+    "LQD":  "etf_scraper",   # iShares iBoxx IG Corporate Bond
+    "HYG":  "etf_scraper",   # iShares iBoxx HY Corporate Bond
+    "TLT":  "etf_scraper",   # iShares 20+ Year Treasury Bond
+    "IAU":  "etf_scraper",   # iShares Gold Trust
+    "IBB":  "etf_scraper",   # iShares Biotechnology
+    "SOXX": "etf_scraper",   # iShares Semiconductor
+    "IETC": "etf_scraper",   # iShares U.S. Tech Independence
+
+    # ── SSGA / SPDR ───────────────────────────────────────────────────────────
+    "SPY":  "etf_scraper",   # SPDR S&P 500
+    "MDY":  "etf_scraper",   # SPDR S&P MidCap 400
+    "GLD":  "etf_scraper",   # SPDR Gold Shares
+    "XLK":  "etf_scraper",   # Technology Select Sector
+    "XLV":  "etf_scraper",   # Health Care Select Sector
+    "XLF":  "etf_scraper",   # Financial Select Sector
+    "XLE":  "etf_scraper",   # Energy Select Sector
+    "XLI":  "etf_scraper",   # Industrial Select Sector
+    "XLY":  "etf_scraper",   # Consumer Discretionary Select Sector
+    "XLB":  "etf_scraper",   # Materials Select Sector
+    "XLP":  "etf_scraper",   # Consumer Staples Select Sector
+    "XLU":  "etf_scraper",   # Utilities Select Sector
+    "XLC":  "etf_scraper",   # Communication Services Select Sector
+    "XLRE": "etf_scraper",   # Real Estate Select Sector
+    "XRT":  "etf_scraper",   # SPDR S&P Retail
+    "KRE":  "etf_scraper",   # SPDR S&P Regional Banking
+
+    # ── Vanguard ──────────────────────────────────────────────────────────────
+    "VOO":  "etf_scraper",   # Vanguard S&P 500
+    "VTI":  "etf_scraper",   # Vanguard Total Stock Market
+    "VEA":  "etf_scraper",   # Vanguard FTSE Developed Markets
+    "VWO":  "etf_scraper",   # Vanguard FTSE Emerging Markets
+    "BND":  "etf_scraper",   # Vanguard Total Bond Market
+    "BNDX": "etf_scraper",   # Vanguard Total International Bond
+    "VNQ":  "etf_scraper",   # Vanguard Real Estate
+    "VIG":  "etf_scraper",   # Vanguard Dividend Appreciation
+    "VYM":  "etf_scraper",   # Vanguard High Dividend Yield
+    "VGT":  "etf_scraper",   # Vanguard Information Technology
+    "VUG":  "etf_scraper",   # Vanguard Growth
+    "VTV":  "etf_scraper",   # Vanguard Value
+    "VB":   "etf_scraper",   # Vanguard Small-Cap
+    "VO":   "etf_scraper",   # Vanguard Mid-Cap
+    "VXUS": "etf_scraper",   # Vanguard Total International Stock
+
+    # ── Invesco ───────────────────────────────────────────────────────────────
+    "QQQ":  "etf_scraper",   # Invesco QQQ (Nasdaq-100)
+    "QQQM": "etf_scraper",   # Invesco Nasdaq-100 (smaller share class)
+    "RSP":  "etf_scraper",   # Invesco S&P 500 Equal Weight
+
+    # ── ARK Invest — direct CSV download ─────────────────────────────────────
+    "ARKK": "ark",           # ARK Innovation
+    "ARKW": "ark",           # ARK Next Generation Internet
+    "ARKG": "ark",           # ARK Genomic Revolution
+    "ARKF": "ark",           # ARK Fintech Innovation
+    "ARKQ": "ark",           # ARK Autonomous Technology & Robotics
+
+    # ── Alpha Vantage — niche / custom ETFs ──────────────────────────────────
+    # These aren't covered by etf-scraper (smaller or non-standard providers).
+    # Each call costs 1 of your 25 free daily API calls.
     "ARTY": "alphavantage",
-    "IETC": "alphavantage",
-    "IWM":  "alphavantage",
-    "KWEB": "alphavantage",
+    "IETC": "alphavantage",  # will be tried via etf_scraper first above;
+    "KWEB": "alphavantage",  # KraneShares China Internet
     "QBIG": "alphavantage",
-    "QQQ":  "alphavantage",
-    "RTH":  "alphavantage",
-    "SOXX": "alphavantage",
+    "RTH":  "alphavantage",  # VanEck Retail
     "TOLL": "alphavantage",
     "TOPT": "alphavantage",
     "XMAG": "alphavantage",
+    "SCHD": "alphavantage",  # Schwab US Dividend Equity
+    "JEPI": "alphavantage",  # JPMorgan Equity Premium Income
+    "JEPQ": "alphavantage",  # JPMorgan Nasdaq Equity Premium Income
 }
 
 ARK_FILENAMES = {
@@ -81,60 +137,68 @@ ARK_FILENAMES = {
 
 # ── Provider fetchers ────────────────────────────────────────────────────────
 
-def fetch_ssga(ticker: str) -> list:
-    """Fetch holdings from SSGA XLSX direct download."""
-    url = (
-        "https://www.ssga.com/library-content/products/fund-data/etfs/us/"
-        f"holdings-daily-us-en-{ticker.lower()}.xlsx"
-    )
-    r = requests.get(url, headers={"User-Agent": UA, "Referer": "https://www.ssga.com"}, timeout=30)
-    r.raise_for_status()
+_scraper = None  # lazy-init so import-time errors don't block the whole script
 
-    wb  = openpyxl.load_workbook(io.BytesIO(r.content), read_only=True, data_only=True)
-    ws  = wb.active
-    rows = list(ws.iter_rows(values_only=True))
+def get_scraper():
+    global _scraper
+    if _scraper is None:
+        _scraper = ETFScraper()
+    return _scraper
 
-    # Find the data header row dynamically (row containing "Ticker" and "Weight")
-    header_idx = None
-    for i, row in enumerate(rows):
-        cells = [str(c).strip() if c is not None else "" for c in row]
-        if "Ticker" in cells and any("Weight" in c for c in cells):
-            header_idx = i
-            break
-    if header_idx is None:
-        raise ValueError(f"Cannot find header row in SSGA XLSX for {ticker}")
 
-    headers    = [str(c).strip() if c is not None else "" for c in rows[header_idx]]
-    ticker_col = next((i for i, h in enumerate(headers) if h == "Ticker"), None)
-    name_col   = next((i for i, h in enumerate(headers) if h == "Name"), None)
-    weight_col = next((i for i, h in enumerate(headers) if "Weight" in h), None)
+def _df_to_holdings(df: pd.DataFrame) -> list:
+    """Normalize an etf-scraper DataFrame to {asset, name, weightPercentage}."""
+    col_lower = {c.lower().strip(): c for c in df.columns}
 
-    if ticker_col is None or weight_col is None:
-        raise ValueError(f"Missing Ticker/Weight columns in SSGA XLSX for {ticker}: {headers}")
+    def find(*candidates):
+        for name in candidates:
+            if name in col_lower:
+                return col_lower[name]
+        return None
+
+    sym_col    = find("ticker", "holding ticker", "symbol", "stock_ticker")
+    name_col   = find("name", "security name", "description", "company name", "company")
+    weight_col = find("weight (%)", "weight(%)", "weight", "weighting", "% of net assets")
+
+    if sym_col is None or weight_col is None:
+        raise ValueError(f"Unrecognised columns: {list(df.columns)}")
 
     holdings = []
-    for row in rows[header_idx + 1:]:
-        if not any(row):
-            break  # blank row signals end of data
-        sym = str(row[ticker_col]).strip() if row[ticker_col] is not None else ""
-        if not sym or sym in {"-", "N/A", "n/a", "None", "nan"}:
+    for _, row in df.iterrows():
+        sym = str(row[sym_col]).strip().upper() if pd.notna(row[sym_col]) else ""
+        if not sym or sym in {"N/A", "NA", "-", "NAN", "NONE", ""}:
             continue
         try:
             weight = float(row[weight_col])
-        except (TypeError, ValueError):
+        except (ValueError, TypeError):
             continue
         if abs(weight) < 1e-9:
             continue
-        # SSGA stores weight as a decimal fraction (0.0721 = 7.21%)
-        weight_pct = weight * 100
-        name = str(row[name_col]).strip() if name_col is not None and row[name_col] is not None else ""
-        holdings.append({"asset": sym.upper(), "name": name, "weightPercentage": round(weight_pct, 6)})
+        name = str(row[name_col]).strip() if name_col and pd.notna(row.get(name_col)) else ""
+        holdings.append({"asset": sym, "name": name, "weightPercentage": weight})
+
+    # Some providers return decimal fractions (0.0721) rather than percentages (7.21).
+    # Detect by checking whether the total across all holdings is close to 1 vs 100.
+    if holdings:
+        total = sum(h["weightPercentage"] for h in holdings)
+        if total < 5:  # looks like decimals
+            for h in holdings:
+                h["weightPercentage"] = round(h["weightPercentage"] * 100, 6)
+        else:
+            for h in holdings:
+                h["weightPercentage"] = round(h["weightPercentage"], 6)
 
     return holdings
 
 
+def fetch_etf_scraper(ticker: str) -> list:
+    df = get_scraper().query_holdings(ticker)
+    if df is None or df.empty:
+        raise ValueError("empty DataFrame returned")
+    return _df_to_holdings(df)
+
+
 def fetch_ark(ticker: str) -> list:
-    """Fetch holdings from ARK Invest CSV direct download."""
     filename = ARK_FILENAMES.get(ticker)
     if not filename:
         raise ValueError(f"No ARK filename mapping for {ticker}")
@@ -142,67 +206,56 @@ def fetch_ark(ticker: str) -> list:
     r   = requests.get(url, headers={"User-Agent": UA}, timeout=30)
     r.raise_for_status()
 
-    reader   = csv.DictReader(io.StringIO(r.text))
     holdings = []
-    for row in reader:
+    for row in csv.DictReader(io.StringIO(r.text)):
         sym = (row.get("ticker") or "").strip()
         if not sym or sym in {"-", "N/A", "n/a"}:
             continue
-        weight_str = (row.get("weight (%)") or "0").strip().rstrip("%")
         try:
-            weight_pct = float(weight_str)
+            weight_pct = float((row.get("weight (%)") or "0").strip().rstrip("%"))
         except ValueError:
             continue
         if abs(weight_pct) < 1e-9:
             continue
         name = (row.get("company") or "").strip()
         holdings.append({"asset": sym.upper(), "name": name, "weightPercentage": round(weight_pct, 6)})
-
     return holdings
 
 
 def fetch_alphavantage(ticker: str) -> list:
-    """Fetch holdings from Alpha Vantage ETF_PROFILE endpoint."""
     if not AV_KEY:
         raise ValueError("ALPHA_VANTAGE_KEY not set")
-    url = (
-        f"https://www.alphavantage.co/query"
-        f"?function=ETF_PROFILE&symbol={ticker}&apikey={AV_KEY}"
-    )
-    r    = requests.get(url, timeout=30)
-    r.raise_for_status()
-    data = r.json()
-
+    url  = f"https://www.alphavantage.co/query?function=ETF_PROFILE&symbol={ticker}&apikey={AV_KEY}"
+    data = requests.get(url, timeout=30).json()
     if "Error Message" in data:
         raise ValueError(data["Error Message"])
     if "Information" in data:
-        raise ValueError(data["Information"])  # rate limit message
+        raise ValueError(data["Information"])
     if not isinstance(data.get("holdings"), list):
-        raise ValueError(f"No holdings array returned for {ticker}")
-
+        raise ValueError("no holdings array returned")
     holdings = []
     for h in data["holdings"]:
         sym = (h.get("symbol") or "").strip().upper()
         if not sym or sym == "N/A":
             continue
-        weight_pct = float(h.get("weight", 0)) * 100
-        name       = h.get("description", "")
-        holdings.append({"asset": sym, "name": name, "weightPercentage": round(weight_pct, 6)})
-
+        holdings.append({
+            "asset": sym,
+            "name":  h.get("description", ""),
+            "weightPercentage": round(float(h.get("weight", 0)) * 100, 6),
+        })
     return holdings
 
 
 # ── Main ─────────────────────────────────────────────────────────────────────
 
 FETCHERS = {
-    "ssga":         fetch_ssga,
+    "etf_scraper":  fetch_etf_scraper,
     "ark":          fetch_ark,
     "alphavantage": fetch_alphavantage,
 }
 
 
 def main():
-    # Load existing cache so failed fetches keep the previous data
     if CACHE_FILE.exists():
         with open(CACHE_FILE, encoding="utf-8") as f:
             cache = json.load(f)
@@ -211,16 +264,23 @@ def main():
 
     now      = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     av_calls = 0
-    success  = []
-    failed   = []
+    success, failed = [], []
 
+    # Deduplicate — IETC appears in both etf_scraper and alphavantage sections
+    # above; etf_scraper wins because it comes first in the dict.
+    seen = set()
+    etf_list = []
     for ticker, provider in ETF_CONFIG.items():
-        print(f"  [{provider:>13}] {ticker:<6} ... ", end="", flush=True)
+        if ticker not in seen:
+            seen.add(ticker)
+            etf_list.append((ticker, provider))
+
+    for ticker, provider in etf_list:
+        print(f"  [{provider:>12}] {ticker:<6} ... ", end="", flush=True)
         try:
-            # Alpha Vantage free tier: 5 calls/min → wait 13s between calls
-            if provider == "alphavantage" and av_calls > 0:
-                time.sleep(13)
             if provider == "alphavantage":
+                if av_calls > 0:
+                    time.sleep(13)  # stay under 5 calls/min on free tier
                 av_calls += 1
 
             holdings = FETCHERS[provider](ticker)
@@ -234,20 +294,17 @@ def main():
         except Exception as exc:
             print(f"✗  {exc}")
             failed.append((ticker, str(exc)))
-            # keep the previous cache entry if one exists
 
-    # Write updated cache
     with open(CACHE_FILE, "w", encoding="utf-8") as f:
         json.dump(cache, f, indent=2, ensure_ascii=False)
 
-    print(f"\n{'─'*50}")
+    print(f"\n{'─'*52}")
     print(f"Updated: {len(success)}   Failed: {len(failed)}")
     if failed:
-        print("Failed ETFs:")
+        print("Failed:")
         for t, err in failed:
             print(f"  {t}: {err}")
 
-    # Non-zero exit only if everything failed (likely a config/network issue)
     if len(success) == 0:
         sys.exit(1)
 
