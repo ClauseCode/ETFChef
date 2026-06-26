@@ -193,6 +193,27 @@ ISHARES_PRODUCT_IDS = {
     "SOXX": "239705",
 }
 
+# ── iShares shared Playwright state ──────────────────────────────────────────
+# Browser and context are created once and reused across all iShares ETFs so
+# that Cloudflare cookies persist and we don't spin up 17 browser instances.
+
+_ishares_pw  = None
+_ishares_ctx = None
+
+def _get_ishares_ctx():
+    global _ishares_pw, _ishares_ctx
+    if _ishares_ctx is None:
+        from playwright.sync_api import sync_playwright
+        _ishares_pw = sync_playwright().start()
+        browser = _ishares_pw.chromium.launch(headless=True)
+        _ishares_ctx = browser.new_context(user_agent=UA)
+        # Pre-warm: load the iShares homepage so Cloudflare sets its cookies
+        page = _ishares_ctx.new_page()
+        page.goto("https://www.ishares.com/us/", wait_until="domcontentloaded", timeout=60_000)
+        page.close()
+    return _ishares_ctx
+
+
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
 def _df_to_holdings(df: pd.DataFrame) -> list:
@@ -252,14 +273,13 @@ def _find_csv_header(lines: list) -> int:
 
 def fetch_ishares(ticker: str) -> list:
     """
-    Load the iShares product page via Playwright (bypasses Cloudflare), then
-    fetch the holdings CSV using the session cookies that were set.
+    Reuse a shared Playwright context (one browser for all iShares ETFs).
+    Loads the product page with domcontentloaded (fast), then fetches the CSV
+    via the session so Cloudflare cookies are already in place.
     """
     prod_id = ISHARES_PRODUCT_IDS.get(ticker)
     if not prod_id:
         raise ValueError(f"No product ID for iShares {ticker}")
-
-    from playwright.sync_api import sync_playwright
 
     product_url = f"https://www.ishares.com/us/products/{prod_id}/"
     csv_url = (
@@ -267,21 +287,27 @@ def fetch_ishares(ticker: str) -> list:
         f"/1467271812596.ajax?tab=all&fileType=csv&dataType=fund"
     )
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        ctx = browser.new_context(user_agent=UA)
-        page = ctx.new_page()
-        page.goto(product_url, wait_until="networkidle", timeout=90_000)
+    ctx = _get_ishares_ctx()
+    page = ctx.new_page()
+    try:
+        page.goto(product_url, wait_until="domcontentloaded", timeout=60_000)
         resp = page.request.get(csv_url, headers={"Referer": product_url})
         content = resp.text()
-        browser.close()
+    finally:
+        page.close()
+
+    if "<html" in content[:200].lower():
+        raise ValueError("Got HTML instead of CSV — Cloudflare blocking CSV endpoint")
 
     lines = content.splitlines()
-    if len(lines) < 5 or (lines and "<html" in lines[0].lower()):
-        raise ValueError("Got HTML instead of CSV — Cloudflare may still be blocking")
-
     header = _find_csv_header(lines)
-    df = pd.read_csv(io.StringIO("\n".join(lines[header:])))
+    # engine='python' + on_bad_lines='skip' handles iShares footer rows that
+    # change column count (e.g. footnotes appended after the holdings table)
+    df = pd.read_csv(
+        io.StringIO("\n".join(lines[header:])),
+        on_bad_lines="skip",
+        engine="python",
+    )
     return _df_to_holdings(df)
 
 
