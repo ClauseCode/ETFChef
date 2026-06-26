@@ -65,22 +65,63 @@ ETF_CONFIG = {
     "IETC": "etf_scraper",   # iShares U.S. Tech Independence
 
     # ── SSGA / SPDR ───────────────────────────────────────────────────────────
+    # Core / broad
     "SPY":  "etf_scraper",   # SPDR S&P 500
     "MDY":  "etf_scraper",   # SPDR S&P MidCap 400
     "GLD":  "etf_scraper",   # SPDR Gold Shares
-    "XLK":  "etf_scraper",   # Technology Select Sector
-    "XLV":  "etf_scraper",   # Health Care Select Sector
-    "XLF":  "etf_scraper",   # Financial Select Sector
-    "XLE":  "etf_scraper",   # Energy Select Sector
-    "XLI":  "etf_scraper",   # Industrial Select Sector
-    "XLY":  "etf_scraper",   # Consumer Discretionary Select Sector
-    "XLB":  "etf_scraper",   # Materials Select Sector
-    "XLP":  "etf_scraper",   # Consumer Staples Select Sector
-    "XLU":  "etf_scraper",   # Utilities Select Sector
+    # Select Sector XL series
     "XLC":  "etf_scraper",   # Communication Services Select Sector
+    "XLP":  "etf_scraper",   # Consumer Staples Select Sector
+    "XLY":  "etf_scraper",   # Consumer Discretionary Select Sector
+    "XLE":  "etf_scraper",   # Energy Select Sector
+    "XLF":  "etf_scraper",   # Financial Select Sector
+    "XLV":  "etf_scraper",   # Health Care Select Sector
+    "XLI":  "etf_scraper",   # Industrial Select Sector
+    "XLB":  "etf_scraper",   # Materials Select Sector
     "XLRE": "etf_scraper",   # Real Estate Select Sector
-    "XRT":  "etf_scraper",   # SPDR S&P Retail
+    "XLK":  "etf_scraper",   # Technology Select Sector
+    "XLU":  "etf_scraper",   # Utilities Select Sector
+    "XLSR": "etf_scraper",   # SPDR US Sector Rotation
+    # Select Sector SPDR Premium Income series
+    "XLCI": "etf_scraper",   # Communication Services Premium Income
+    "XLYI": "etf_scraper",   # Consumer Discretionary Premium Income
+    "XLSI": "etf_scraper",   # Consumer Staples Premium Income
+    "XLEI": "etf_scraper",   # Energy Premium Income
+    "XLFI": "etf_scraper",   # Financial Premium Income
+    "XLVI": "etf_scraper",   # Health Care Premium Income
+    "XLII": "etf_scraper",   # Industrial Premium Income
+    "XLBI": "etf_scraper",   # Materials Premium Income
+    "XLRI": "etf_scraper",   # Real Estate Premium Income
+    "XLKI": "etf_scraper",   # Technology Premium Income
+    "XLUI": "etf_scraper",   # Utilities Premium Income
+    # Kensho / New Economies
+    "KOMP": "etf_scraper",   # SPDR S&P Kensho New Economies Composite
+    "SIMS": "etf_scraper",   # SPDR S&P Kensho Intelligent Structures
+    "HAIL": "etf_scraper",   # SPDR S&P Kensho Smart Mobility
+    "FITE": "etf_scraper",   # SPDR S&P Kensho Future Security
+    "ROKT": "etf_scraper",   # SPDR S&P Kensho Final Frontiers
+    "CNRG": "etf_scraper",   # SPDR S&P Kensho Clean Power
+    # Industry (modified equal weighted)
+    "KBE":  "etf_scraper",   # SPDR S&P Bank
     "KRE":  "etf_scraper",   # SPDR S&P Regional Banking
+    "KCE":  "etf_scraper",   # SPDR S&P Capital Markets
+    "KIE":  "etf_scraper",   # SPDR S&P Insurance
+    "XAR":  "etf_scraper",   # SPDR S&P Aerospace & Defense
+    "XTN":  "etf_scraper",   # SPDR S&P Transportation
+    "XBI":  "etf_scraper",   # SPDR S&P Biotech
+    "XPH":  "etf_scraper",   # SPDR S&P Pharmaceuticals
+    "XHE":  "etf_scraper",   # SPDR S&P Health Care Equipment
+    "XHS":  "etf_scraper",   # SPDR S&P Health Care Services
+    "XOP":  "etf_scraper",   # SPDR S&P Oil & Gas Exploration & Production
+    "XES":  "etf_scraper",   # SPDR S&P Oil & Gas Equipment & Services
+    "XME":  "etf_scraper",   # SPDR S&P Metals & Mining
+    "XRT":  "etf_scraper",   # SPDR S&P Retail
+    "XHB":  "etf_scraper",   # SPDR S&P Homebuilders
+    "XSD":  "etf_scraper",   # SPDR S&P Semiconductor
+    "XSW":  "etf_scraper",   # SPDR S&P Software & Services
+    "XNTK": "etf_scraper",   # SPDR NYSE Technology
+    "XITK": "etf_scraper",   # SPDR FactSet Innovative Technology
+    "XTL":  "etf_scraper",   # SPDR S&P Telecom
 
     # ── Vanguard ──────────────────────────────────────────────────────────────
     "VOO":  "etf_scraper",   # Vanguard S&P 500
