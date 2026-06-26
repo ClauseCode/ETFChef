@@ -7,11 +7,13 @@ GitHub Actions: triggered weekly; ALPHA_VANTAGE_KEY set as repo secret
 
 Providers
 ---------
-ishares       iShares (BlackRock) — Playwright loads product page (Cloudflare bypass),
-              then fetches CSV via the established session
+ishares       iShares (BlackRock) — Playwright loads product page, then fetches CSV
+              via in-browser fetch() to bypass Cloudflare bot detection
 ssga          SSGA/SPDR — direct XLSX download from ssga.com (no bot detection)
-vanguard      Vanguard — direct CSV download from vanguard.com portal (portId map)
-invesco       Invesco — direct CSV download from invesco.com (header row auto-detected)
+vanguard      Vanguard — Playwright loads portal page, then fetches CSV via
+              in-browser fetch() (download endpoint requires browser session)
+invesco       Invesco — Playwright loads ETF page, then fetches CSV via
+              in-browser fetch() (direct requests return 406)
 ark           ARK Invest public CSV — no auth, no browser
 alphavantage  Alpha Vantage ETF_PROFILE API — fallback for niche ETFs
               (25 calls/day on free tier)
@@ -193,25 +195,74 @@ ISHARES_PRODUCT_IDS = {
     "SOXX": "239705",
 }
 
-# ── iShares shared Playwright state ──────────────────────────────────────────
-# Browser and context are created once and reused across all iShares ETFs so
-# that Cloudflare cookies persist and we don't spin up 17 browser instances.
+# ── Shared Playwright state ───────────────────────────────────────────────────
+# One browser process; separate browser contexts per provider so that cookies
+# don't cross-contaminate.  page.evaluate(fetch(...)) is used rather than
+# page.request.get() because the former runs inside the browser's JS engine
+# (full Cloudflare / bot-detection fingerprint), while the latter is an
+# out-of-process HTTP request that Cloudflare can distinguish and block.
 
-_ishares_pw  = None
+_pw_instance = None
+_pw_browser  = None
+
+def _get_pw_browser():
+    global _pw_instance, _pw_browser
+    if _pw_browser is None:
+        from playwright.sync_api import sync_playwright
+        _pw_instance = sync_playwright().start()
+        _pw_browser  = _pw_instance.chromium.launch(headless=True)
+    return _pw_browser
+
+
+def _make_ctx(warmup_url: str):
+    """Create a new browser context and pre-warm it by loading warmup_url."""
+    ctx = _get_pw_browser().new_context(user_agent=UA)
+    page = ctx.new_page()
+    try:
+        page.goto(warmup_url, wait_until="domcontentloaded", timeout=60_000)
+    finally:
+        page.close()
+    return ctx
+
+
+def _browser_fetch(ctx, navigate_url: str, fetch_url: str) -> str:
+    """Navigate to navigate_url, then fetch fetch_url from within the browser."""
+    page = ctx.new_page()
+    try:
+        page.goto(navigate_url, wait_until="domcontentloaded", timeout=60_000)
+        content = page.evaluate(
+            "async (url) => { const r = await fetch(url, {credentials:'include'}); return r.text(); }",
+            fetch_url,
+        )
+    finally:
+        page.close()
+    return content
+
+
 _ishares_ctx = None
+_vanguard_ctx = None
+_invesco_ctx  = None
+
 
 def _get_ishares_ctx():
-    global _ishares_pw, _ishares_ctx
+    global _ishares_ctx
     if _ishares_ctx is None:
-        from playwright.sync_api import sync_playwright
-        _ishares_pw = sync_playwright().start()
-        browser = _ishares_pw.chromium.launch(headless=True)
-        _ishares_ctx = browser.new_context(user_agent=UA)
-        # Pre-warm: load the iShares homepage so Cloudflare sets its cookies
-        page = _ishares_ctx.new_page()
-        page.goto("https://www.ishares.com/us/", wait_until="domcontentloaded", timeout=60_000)
-        page.close()
+        _ishares_ctx = _make_ctx("https://www.ishares.com/us/")
     return _ishares_ctx
+
+
+def _get_vanguard_ctx():
+    global _vanguard_ctx
+    if _vanguard_ctx is None:
+        _vanguard_ctx = _make_ctx("https://www.vanguard.com/us/portal/")
+    return _vanguard_ctx
+
+
+def _get_invesco_ctx():
+    global _invesco_ctx
+    if _invesco_ctx is None:
+        _invesco_ctx = _make_ctx("https://www.invesco.com/us/")
+    return _invesco_ctx
 
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
@@ -272,11 +323,6 @@ def _find_csv_header(lines: list) -> int:
 # ── Provider fetchers ─────────────────────────────────────────────────────────
 
 def fetch_ishares(ticker: str) -> list:
-    """
-    Reuse a shared Playwright context (one browser for all iShares ETFs).
-    Loads the product page with domcontentloaded (fast), then fetches the CSV
-    via the session so Cloudflare cookies are already in place.
-    """
     prod_id = ISHARES_PRODUCT_IDS.get(ticker)
     if not prod_id:
         raise ValueError(f"No product ID for iShares {ticker}")
@@ -287,27 +333,14 @@ def fetch_ishares(ticker: str) -> list:
         f"/1467271812596.ajax?tab=all&fileType=csv&dataType=fund"
     )
 
-    ctx = _get_ishares_ctx()
-    page = ctx.new_page()
-    try:
-        page.goto(product_url, wait_until="domcontentloaded", timeout=60_000)
-        resp = page.request.get(csv_url, headers={"Referer": product_url})
-        content = resp.text()
-    finally:
-        page.close()
+    content = _browser_fetch(_get_ishares_ctx(), product_url, csv_url)
 
     if "<html" in content[:200].lower():
-        raise ValueError("Got HTML instead of CSV — Cloudflare blocking CSV endpoint")
+        raise ValueError("Got HTML — Cloudflare still blocking CSV endpoint")
 
     lines = content.splitlines()
     header = _find_csv_header(lines)
-    # engine='python' + on_bad_lines='skip' handles iShares footer rows that
-    # change column count (e.g. footnotes appended after the holdings table)
-    df = pd.read_csv(
-        io.StringIO("\n".join(lines[header:])),
-        on_bad_lines="skip",
-        engine="python",
-    )
+    df = pd.read_csv(io.StringIO("\n".join(lines[header:])), on_bad_lines="skip", engine="python")
     return _df_to_holdings(df)
 
 
@@ -336,43 +369,42 @@ def fetch_ssga(ticker: str) -> list:
 
 
 def fetch_vanguard(ticker: str) -> list:
-    """Direct CSV download from the Vanguard fund portal using the portId."""
     port_id = VANGUARD_PORT_IDS.get(ticker)
     if not port_id:
         raise ValueError(f"No portId mapping for Vanguard {ticker}")
-    url = (
+
+    portal_url = "https://www.vanguard.com/us/portal/"
+    csv_url = (
         f"https://www.vanguard.com/us/portal/fund/portfolio-holdings-download"
         f"?portId={port_id}&filetype=csv&portType=fund"
     )
-    r = requests.get(url, headers={"User-Agent": UA, "Accept": "text/csv, */*"}, timeout=30)
-    r.raise_for_status()
-    if "<html" in r.text[:200].lower():
-        raise ValueError("Got HTML response — Vanguard portal may require authentication")
-    lines = r.text.splitlines()
+
+    content = _browser_fetch(_get_vanguard_ctx(), portal_url, csv_url)
+
+    if "<html" in content[:200].lower():
+        raise ValueError("Got HTML — Vanguard portal requires login")
+
+    lines = content.splitlines()
     header = _find_csv_header(lines)
-    df = pd.read_csv(
-        io.StringIO("\n".join(lines[header:])),
-        on_bad_lines="skip",
-        engine="python",
-    )
+    df = pd.read_csv(io.StringIO("\n".join(lines[header:])), on_bad_lines="skip", engine="python")
     return _df_to_holdings(df)
 
 
 def fetch_invesco(ticker: str) -> list:
-    """Direct CSV download from invesco.com; auto-detects the header row."""
-    url = (
+    etf_url = (
+        f"https://www.invesco.com/us/financial-products/etfs/etf-details"
+        f"?audienceType=Investor&ticker={ticker}"
+    )
+    csv_url = (
         f"https://www.invesco.com/us/financial-products/etfs/holdings"
         f"/main/holdings/0?audienceType=Investor&ticker={ticker}"
     )
-    r = requests.get(url, headers={"User-Agent": UA, "Accept": "text/csv, */*"}, timeout=30)
-    r.raise_for_status()
-    lines = r.text.splitlines()
+
+    content = _browser_fetch(_get_invesco_ctx(), etf_url, csv_url)
+
+    lines = content.splitlines()
     header = _find_csv_header(lines)
-    df = pd.read_csv(
-        io.StringIO("\n".join(lines[header:])),
-        on_bad_lines="skip",
-        engine="python",
-    )
+    df = pd.read_csv(io.StringIO("\n".join(lines[header:])), on_bad_lines="skip", engine="python")
     return _df_to_holdings(df)
 
 
