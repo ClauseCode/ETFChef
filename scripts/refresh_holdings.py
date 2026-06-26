@@ -69,7 +69,7 @@ ETF_CONFIG = {
     # Core / broad
     "SPY":  "ssga",   # SPDR S&P 500
     "MDY":  "ssga",   # SPDR S&P MidCap 400
-    "GLD":  "ssga",   # SPDR Gold Shares
+    # GLD omitted — physical gold fund, no equity holdings file on SSGA
     # Select Sector XL series
     "XLC":  "ssga",   # Communication Services Select Sector
     "XLP":  "ssga",   # Consumer Staples Select Sector
@@ -344,11 +344,17 @@ def fetch_vanguard(ticker: str) -> list:
         f"https://www.vanguard.com/us/portal/fund/portfolio-holdings-download"
         f"?portId={port_id}&filetype=csv&portType=fund"
     )
-    r = requests.get(url, headers={"User-Agent": UA}, timeout=30)
+    r = requests.get(url, headers={"User-Agent": UA, "Accept": "text/csv, */*"}, timeout=30)
     r.raise_for_status()
+    if "<html" in r.text[:200].lower():
+        raise ValueError("Got HTML response — Vanguard portal may require authentication")
     lines = r.text.splitlines()
     header = _find_csv_header(lines)
-    df = pd.read_csv(io.StringIO("\n".join(lines[header:])))
+    df = pd.read_csv(
+        io.StringIO("\n".join(lines[header:])),
+        on_bad_lines="skip",
+        engine="python",
+    )
     return _df_to_holdings(df)
 
 
@@ -358,11 +364,15 @@ def fetch_invesco(ticker: str) -> list:
         f"https://www.invesco.com/us/financial-products/etfs/holdings"
         f"/main/holdings/0?audienceType=Investor&ticker={ticker}"
     )
-    r = requests.get(url, headers={"User-Agent": UA}, timeout=30)
+    r = requests.get(url, headers={"User-Agent": UA, "Accept": "text/csv, */*"}, timeout=30)
     r.raise_for_status()
     lines = r.text.splitlines()
     header = _find_csv_header(lines)
-    df = pd.read_csv(io.StringIO("\n".join(lines[header:])))
+    df = pd.read_csv(
+        io.StringIO("\n".join(lines[header:])),
+        on_bad_lines="skip",
+        engine="python",
+    )
     return _df_to_holdings(df)
 
 
