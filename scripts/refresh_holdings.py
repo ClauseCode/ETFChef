@@ -257,7 +257,7 @@ FETCHERS = {
 
 def main():
     if CACHE_FILE.exists():
-        with open(CACHE_FILE, encoding="utf-8") as f:
+        with open(CACHE_FILE, encoding="utf-8-sig") as f:  # utf-8-sig strips BOM if present
             cache = json.load(f)
     else:
         cache = {"version": 1, "holdings": {}}
