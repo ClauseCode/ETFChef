@@ -52,7 +52,7 @@ ETF_CONFIG = {
     "IVV":  "ishares",   # iShares Core S&P 500
     "IJH":  "ishares",   # iShares Core S&P Mid-Cap
     "IJR":  "ishares",   # iShares Core S&P Small-Cap
-    "IWM":  "ishares",   # iShares Russell 2000
+    "IWM":  "alphavantage",   # iShares Russell 2000
     "IWB":  "ishares",   # iShares Russell 1000
     "IWF":  "ishares",   # iShares Russell 1000 Growth
     "IWD":  "ishares",   # iShares Russell 1000 Value
@@ -65,7 +65,7 @@ ETF_CONFIG = {
     "TLT":  "ishares",   # iShares 20+ Year Treasury Bond
     "IAU":  "ishares",   # iShares Gold Trust
     "IBB":  "ishares",   # iShares Biotechnology
-    "SOXX": "ishares",   # iShares Semiconductor
+    "SOXX": "alphavantage",   # iShares Semiconductor
 
     # ── SSGA / SPDR ───────────────────────────────────────────────────────────
     # Core / broad
@@ -144,9 +144,9 @@ ETF_CONFIG = {
     "VXUS": "vanguard",   # Vanguard Total International Stock
 
     # ── Invesco ───────────────────────────────────────────────────────────────
-    "QQQ":  "invesco",   # Invesco QQQ (Nasdaq-100)
-    "QQQM": "invesco",   # Invesco Nasdaq-100 (smaller share class)
-    "RSP":  "invesco",   # Invesco S&P 500 Equal Weight
+    "QQQ":  "alphavantage",   # Invesco QQQ (Nasdaq-100)
+    "QQQM": "alphavantage",   # Invesco Nasdaq-100 (smaller share class)
+    "RSP":  "alphavantage",   # Invesco S&P 500 Equal Weight
 
     # ── ARK Invest — direct CSV download ─────────────────────────────────────
     "ARKK": "ark",   # ARK Innovation
@@ -210,13 +210,29 @@ def _get_pw_browser():
     if _pw_browser is None:
         from playwright.sync_api import sync_playwright
         _pw_instance = sync_playwright().start()
-        _pw_browser  = _pw_instance.chromium.launch(headless=True)
+        _pw_browser = _pw_instance.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--window-size=1920,1080",
+            ],
+        )
     return _pw_browser
 
 
 def _make_ctx(warmup_url: str):
     """Create a new browser context and pre-warm it by loading warmup_url."""
-    ctx = _get_pw_browser().new_context(user_agent=UA)
+    ctx = _get_pw_browser().new_context(
+        user_agent=UA,
+        viewport={"width": 1920, "height": 1080},
+        locale="en-US",
+        timezone_id="America/New_York",
+        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+    )
+    # Patch navigator.webdriver so Cloudflare/bot-detection sees a real browser
+    ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
     page = ctx.new_page()
     try:
         page.goto(warmup_url, wait_until="domcontentloaded", timeout=60_000)
@@ -226,17 +242,40 @@ def _make_ctx(warmup_url: str):
 
 
 def _browser_fetch(ctx, navigate_url: str, fetch_url: str) -> str:
-    """Navigate to navigate_url, then fetch fetch_url from within the browser."""
+    """Navigate to navigate_url, then fetch fetch_url from within the browser.
+
+    Uses page.evaluate(fetch()) instead of page.request.get() so the request
+    runs inside the browser's JS engine — full TLS fingerprint, Cloudflare
+    cookies, and bot-challenge tokens all apply automatically.
+    """
     page = ctx.new_page()
     try:
         page.goto(navigate_url, wait_until="domcontentloaded", timeout=60_000)
-        content = page.evaluate(
-            "async (url) => { const r = await fetch(url, {credentials:'include'}); return r.text(); }",
+        result = page.evaluate(
+            """
+            async (url) => {
+                try {
+                    const r = await fetch(url, {credentials: 'include'});
+                    const text = await r.text();
+                    return {ok: true, status: r.status, text};
+                } catch (e) {
+                    return {ok: false, error: e.toString()};
+                }
+            }
+            """,
             fetch_url,
         )
     finally:
         page.close()
-    return content
+
+    if not result["ok"]:
+        raise ValueError(f"in-browser fetch() threw: {result['error']}")
+    status = result["status"]
+    text   = result["text"]
+    if status != 200:
+        preview = repr(text[:300])
+        raise ValueError(f"HTTP {status} from fetch() — preview: {preview}")
+    return text
 
 
 _ishares_ctx = None
@@ -254,7 +293,9 @@ def _get_ishares_ctx():
 def _get_vanguard_ctx():
     global _vanguard_ctx
     if _vanguard_ctx is None:
-        _vanguard_ctx = _make_ctx("https://www.vanguard.com/us/portal/")
+        # investor.vanguard.com is the public-facing site (no login required);
+        # www.vanguard.com/us/portal/ is their authenticated investor portal.
+        _vanguard_ctx = _make_ctx("https://investor.vanguard.com/")
     return _vanguard_ctx
 
 
@@ -373,21 +414,101 @@ def fetch_vanguard(ticker: str) -> list:
     if not port_id:
         raise ValueError(f"No portId mapping for Vanguard {ticker}")
 
-    portal_url = "https://www.vanguard.com/us/portal/"
-    csv_url = (
-        f"https://www.vanguard.com/us/portal/fund/portfolio-holdings-download"
-        f"?portId={port_id}&filetype=csv&portType=fund"
+    # The authenticated portal download URL is auth-walled.
+    # Instead: load the PUBLIC investor profile page and intercept the XHR
+    # calls it makes for portfolio composition data.
+    profile_url = f"https://investor.vanguard.com/investment-products/etfs/profile/{ticker.lower()}"
+
+    ctx = _get_vanguard_ctx()
+    page = ctx.new_page()
+    captured: list = []
+
+    def on_response(response):
+        url = response.url
+        # Capture any JSON response that mentions "holding" or "portfolio"
+        # from Vanguard's API domain.
+        if "vanguard.com" in url and response.status == 200:
+            if any(k in url.lower() for k in ("holding", "portfolio", "composition")):
+                try:
+                    captured.append(response.json())
+                except Exception:
+                    pass
+
+    page.on("response", on_response)
+    try:
+        page.goto(profile_url, wait_until="networkidle", timeout=90_000)
+    finally:
+        page.close()
+
+    # Look for a holdings-like structure in any captured JSON
+    for blob in captured:
+        holdings = _parse_vanguard_json(blob)
+        if holdings:
+            return holdings
+
+    raise ValueError(
+        f"No holdings data captured from Vanguard profile page "
+        f"(captured {len(captured)} JSON responses — "
+        f"may need a different URL pattern)"
     )
 
-    content = _browser_fetch(_get_vanguard_ctx(), portal_url, csv_url)
 
-    if "<html" in content[:200].lower():
-        raise ValueError("Got HTML — Vanguard portal requires login")
+def _parse_vanguard_json(blob) -> list:
+    """Try to extract [{asset, name, weightPercentage}] from Vanguard API JSON."""
+    if not isinstance(blob, dict):
+        return []
 
-    lines = content.splitlines()
-    header = _find_csv_header(lines)
-    df = pd.read_csv(io.StringIO("\n".join(lines[header:])), on_bad_lines="skip", engine="python")
-    return _df_to_holdings(df)
+    # Common Vanguard API shapes:
+    # {"fundHoldings": [...]}
+    # {"portfolioHoldings": [...]}
+    # {"holdings": [...]}
+    for key in ("fundHoldings", "portfolioHoldings", "holdings", "equityHoldings"):
+        raw = blob.get(key)
+        if isinstance(raw, list) and raw:
+            return _normalise_vanguard_holdings(raw)
+
+    # Recurse one level into nested dicts
+    for val in blob.values():
+        if isinstance(val, dict):
+            result = _parse_vanguard_json(val)
+            if result:
+                return result
+
+    return []
+
+
+def _normalise_vanguard_holdings(rows: list) -> list:
+    """Normalise a list of Vanguard holding dicts."""
+    result = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        sym = (
+            row.get("ticker") or row.get("symbol") or row.get("securityTicker") or ""
+        ).strip().upper()
+        if not sym or sym in {"N/A", "CASH", ""}:
+            continue
+        weight = None
+        for wkey in ("percentWeight", "weight", "percentOfFund", "pctFund", "holdingPercent"):
+            v = row.get(wkey)
+            if v is not None:
+                try:
+                    weight = float(v)
+                    break
+                except (ValueError, TypeError):
+                    pass
+        if weight is None or abs(weight) < 1e-9:
+            continue
+        name = (row.get("longName") or row.get("name") or row.get("securityName") or "").strip()
+        result.append({"asset": sym, "name": name, "weightPercentage": round(weight, 6)})
+
+    if result:
+        total = sum(h["weightPercentage"] for h in result)
+        if total < 5:  # decimal fractions → percentages
+            for h in result:
+                h["weightPercentage"] = round(h["weightPercentage"] * 100, 6)
+
+    return result
 
 
 def fetch_invesco(ticker: str) -> list:
