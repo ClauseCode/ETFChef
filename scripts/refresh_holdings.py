@@ -7,11 +7,14 @@ GitHub Actions: triggered weekly; ALPHA_VANTAGE_KEY set as repo secret
 
 Providers
 ---------
-etf_scraper   etf-scraper library — covers iShares, SSGA/SPDR, Vanguard, Invesco
-              Uses headless Chromium when needed (iShares bot-detection bypass)
+ishares       iShares (BlackRock) — Playwright loads product page (Cloudflare bypass),
+              then fetches CSV via the established session
+ssga          SSGA/SPDR — direct XLSX download from ssga.com (no bot detection)
+vanguard      Vanguard — direct CSV download from vanguard.com portal (portId map)
+invesco       Invesco — direct CSV download from invesco.com (header row auto-detected)
 ark           ARK Invest public CSV — no auth, no browser
-alphavantage  Alpha Vantage ETF_PROFILE API — fallback for niche ETFs not covered
-              by the above (25 calls/day on free tier)
+alphavantage  Alpha Vantage ETF_PROFILE API — fallback for niche ETFs
+              (25 calls/day on free tier)
 
 To add a new ETF, add one line to ETF_CONFIG below and pick a provider.
 """
@@ -27,9 +30,8 @@ from pathlib import Path
 
 import pandas as pd
 import requests
-from etf_scraper import ETFScraper
 
-# ── Config ──────────────────────────────────────────────────────────────────
+# ── Config ───────────────────────────────────────────────────────────────────
 
 CACHE_FILE = Path(__file__).parent.parent / "holdings-cache.json"
 AV_KEY     = os.environ.get("ALPHA_VANTAGE_KEY", "")
@@ -38,157 +40,163 @@ UA         = (
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 )
 
-# ── ETF list ─────────────────────────────────────────────────────────────────
-# Providers: etf_scraper | ark | alphavantage
+# ── ETF list ──────────────────────────────────────────────────────────────────
+# Providers: ishares | ssga | vanguard | invesco | ark | alphavantage
 # Add a new ETF by inserting one line here.
 
 ETF_CONFIG = {
 
     # ── iShares (BlackRock) ───────────────────────────────────────────────────
-    "IVV":  "etf_scraper",   # iShares Core S&P 500
-    "IJH":  "etf_scraper",   # iShares Core S&P Mid-Cap
-    "IJR":  "etf_scraper",   # iShares Core S&P Small-Cap
-    "IWM":  "etf_scraper",   # iShares Russell 2000
-    "IWB":  "etf_scraper",   # iShares Russell 1000
-    "IWF":  "etf_scraper",   # iShares Russell 1000 Growth
-    "IWD":  "etf_scraper",   # iShares Russell 1000 Value
-    "EFA":  "etf_scraper",   # iShares MSCI EAFE
-    "EEM":  "etf_scraper",   # iShares MSCI Emerging Markets
-    "IEMG": "etf_scraper",   # iShares Core MSCI Emerging Markets
-    "AGG":  "etf_scraper",   # iShares Core US Aggregate Bond
-    "LQD":  "etf_scraper",   # iShares iBoxx IG Corporate Bond
-    "HYG":  "etf_scraper",   # iShares iBoxx HY Corporate Bond
-    "TLT":  "etf_scraper",   # iShares 20+ Year Treasury Bond
-    "IAU":  "etf_scraper",   # iShares Gold Trust
-    "IBB":  "etf_scraper",   # iShares Biotechnology
-    "SOXX": "etf_scraper",   # iShares Semiconductor
-    "IETC": "etf_scraper",   # iShares U.S. Tech Independence
+    "IVV":  "ishares",   # iShares Core S&P 500
+    "IJH":  "ishares",   # iShares Core S&P Mid-Cap
+    "IJR":  "ishares",   # iShares Core S&P Small-Cap
+    "IWM":  "ishares",   # iShares Russell 2000
+    "IWB":  "ishares",   # iShares Russell 1000
+    "IWF":  "ishares",   # iShares Russell 1000 Growth
+    "IWD":  "ishares",   # iShares Russell 1000 Value
+    "EFA":  "ishares",   # iShares MSCI EAFE
+    "EEM":  "ishares",   # iShares MSCI Emerging Markets
+    "IEMG": "ishares",   # iShares Core MSCI Emerging Markets
+    "AGG":  "ishares",   # iShares Core US Aggregate Bond
+    "LQD":  "ishares",   # iShares iBoxx IG Corporate Bond
+    "HYG":  "ishares",   # iShares iBoxx HY Corporate Bond
+    "TLT":  "ishares",   # iShares 20+ Year Treasury Bond
+    "IAU":  "ishares",   # iShares Gold Trust
+    "IBB":  "ishares",   # iShares Biotechnology
+    "SOXX": "ishares",   # iShares Semiconductor
 
     # ── SSGA / SPDR ───────────────────────────────────────────────────────────
     # Core / broad
-    "SPY":  "etf_scraper",   # SPDR S&P 500
-    "MDY":  "etf_scraper",   # SPDR S&P MidCap 400
-    "GLD":  "etf_scraper",   # SPDR Gold Shares
+    "SPY":  "ssga",   # SPDR S&P 500
+    "MDY":  "ssga",   # SPDR S&P MidCap 400
+    "GLD":  "ssga",   # SPDR Gold Shares
     # Select Sector XL series
-    "XLC":  "etf_scraper",   # Communication Services Select Sector
-    "XLP":  "etf_scraper",   # Consumer Staples Select Sector
-    "XLY":  "etf_scraper",   # Consumer Discretionary Select Sector
-    "XLE":  "etf_scraper",   # Energy Select Sector
-    "XLF":  "etf_scraper",   # Financial Select Sector
-    "XLV":  "etf_scraper",   # Health Care Select Sector
-    "XLI":  "etf_scraper",   # Industrial Select Sector
-    "XLB":  "etf_scraper",   # Materials Select Sector
-    "XLRE": "etf_scraper",   # Real Estate Select Sector
-    "XLK":  "etf_scraper",   # Technology Select Sector
-    "XLU":  "etf_scraper",   # Utilities Select Sector
-    "XLSR": "etf_scraper",   # SPDR US Sector Rotation
+    "XLC":  "ssga",   # Communication Services Select Sector
+    "XLP":  "ssga",   # Consumer Staples Select Sector
+    "XLY":  "ssga",   # Consumer Discretionary Select Sector
+    "XLE":  "ssga",   # Energy Select Sector
+    "XLF":  "ssga",   # Financial Select Sector
+    "XLV":  "ssga",   # Health Care Select Sector
+    "XLI":  "ssga",   # Industrial Select Sector
+    "XLB":  "ssga",   # Materials Select Sector
+    "XLRE": "ssga",   # Real Estate Select Sector
+    "XLK":  "ssga",   # Technology Select Sector
+    "XLU":  "ssga",   # Utilities Select Sector
+    "XLSR": "ssga",   # SPDR US Sector Rotation
     # Select Sector SPDR Premium Income series
-    "XLCI": "etf_scraper",   # Communication Services Premium Income
-    "XLYI": "etf_scraper",   # Consumer Discretionary Premium Income
-    "XLSI": "etf_scraper",   # Consumer Staples Premium Income
-    "XLEI": "etf_scraper",   # Energy Premium Income
-    "XLFI": "etf_scraper",   # Financial Premium Income
-    "XLVI": "etf_scraper",   # Health Care Premium Income
-    "XLII": "etf_scraper",   # Industrial Premium Income
-    "XLBI": "etf_scraper",   # Materials Premium Income
-    "XLRI": "etf_scraper",   # Real Estate Premium Income
-    "XLKI": "etf_scraper",   # Technology Premium Income
-    "XLUI": "etf_scraper",   # Utilities Premium Income
+    "XLCI": "ssga",   # Communication Services Premium Income
+    "XLYI": "ssga",   # Consumer Discretionary Premium Income
+    "XLSI": "ssga",   # Consumer Staples Premium Income
+    "XLEI": "ssga",   # Energy Premium Income
+    "XLFI": "ssga",   # Financial Premium Income
+    "XLVI": "ssga",   # Health Care Premium Income
+    "XLII": "ssga",   # Industrial Premium Income
+    "XLBI": "ssga",   # Materials Premium Income
+    "XLRI": "ssga",   # Real Estate Premium Income
+    "XLKI": "ssga",   # Technology Premium Income
+    "XLUI": "ssga",   # Utilities Premium Income
     # Kensho / New Economies
-    "KOMP": "etf_scraper",   # SPDR S&P Kensho New Economies Composite
-    "SIMS": "etf_scraper",   # SPDR S&P Kensho Intelligent Structures
-    "HAIL": "etf_scraper",   # SPDR S&P Kensho Smart Mobility
-    "FITE": "etf_scraper",   # SPDR S&P Kensho Future Security
-    "ROKT": "etf_scraper",   # SPDR S&P Kensho Final Frontiers
-    "CNRG": "etf_scraper",   # SPDR S&P Kensho Clean Power
+    "KOMP": "ssga",   # SPDR S&P Kensho New Economies Composite
+    "SIMS": "ssga",   # SPDR S&P Kensho Intelligent Structures
+    "HAIL": "ssga",   # SPDR S&P Kensho Smart Mobility
+    "FITE": "ssga",   # SPDR S&P Kensho Future Security
+    "ROKT": "ssga",   # SPDR S&P Kensho Final Frontiers
+    "CNRG": "ssga",   # SPDR S&P Kensho Clean Power
     # Industry (modified equal weighted)
-    "KBE":  "etf_scraper",   # SPDR S&P Bank
-    "KRE":  "etf_scraper",   # SPDR S&P Regional Banking
-    "KCE":  "etf_scraper",   # SPDR S&P Capital Markets
-    "KIE":  "etf_scraper",   # SPDR S&P Insurance
-    "XAR":  "etf_scraper",   # SPDR S&P Aerospace & Defense
-    "XTN":  "etf_scraper",   # SPDR S&P Transportation
-    "XBI":  "etf_scraper",   # SPDR S&P Biotech
-    "XPH":  "etf_scraper",   # SPDR S&P Pharmaceuticals
-    "XHE":  "etf_scraper",   # SPDR S&P Health Care Equipment
-    "XHS":  "etf_scraper",   # SPDR S&P Health Care Services
-    "XOP":  "etf_scraper",   # SPDR S&P Oil & Gas Exploration & Production
-    "XES":  "etf_scraper",   # SPDR S&P Oil & Gas Equipment & Services
-    "XME":  "etf_scraper",   # SPDR S&P Metals & Mining
-    "XRT":  "etf_scraper",   # SPDR S&P Retail
-    "XHB":  "etf_scraper",   # SPDR S&P Homebuilders
-    "XSD":  "etf_scraper",   # SPDR S&P Semiconductor
-    "XSW":  "etf_scraper",   # SPDR S&P Software & Services
-    "XNTK": "etf_scraper",   # SPDR NYSE Technology
-    "XITK": "etf_scraper",   # SPDR FactSet Innovative Technology
-    "XTL":  "etf_scraper",   # SPDR S&P Telecom
+    "KBE":  "ssga",   # SPDR S&P Bank
+    "KRE":  "ssga",   # SPDR S&P Regional Banking
+    "KCE":  "ssga",   # SPDR S&P Capital Markets
+    "KIE":  "ssga",   # SPDR S&P Insurance
+    "XAR":  "ssga",   # SPDR S&P Aerospace & Defense
+    "XTN":  "ssga",   # SPDR S&P Transportation
+    "XBI":  "ssga",   # SPDR S&P Biotech
+    "XPH":  "ssga",   # SPDR S&P Pharmaceuticals
+    "XHE":  "ssga",   # SPDR S&P Health Care Equipment
+    "XHS":  "ssga",   # SPDR S&P Health Care Services
+    "XOP":  "ssga",   # SPDR S&P Oil & Gas Exploration & Production
+    "XES":  "ssga",   # SPDR S&P Oil & Gas Equipment & Services
+    "XME":  "ssga",   # SPDR S&P Metals & Mining
+    "XRT":  "ssga",   # SPDR S&P Retail
+    "XHB":  "ssga",   # SPDR S&P Homebuilders
+    "XSD":  "ssga",   # SPDR S&P Semiconductor
+    "XSW":  "ssga",   # SPDR S&P Software & Services
+    "XNTK": "ssga",   # SPDR NYSE Technology
+    "XITK": "ssga",   # SPDR FactSet Innovative Technology
+    "XTL":  "ssga",   # SPDR S&P Telecom
 
     # ── Vanguard ──────────────────────────────────────────────────────────────
-    "VOO":  "etf_scraper",   # Vanguard S&P 500
-    "VTI":  "etf_scraper",   # Vanguard Total Stock Market
-    "VEA":  "etf_scraper",   # Vanguard FTSE Developed Markets
-    "VWO":  "etf_scraper",   # Vanguard FTSE Emerging Markets
-    "BND":  "etf_scraper",   # Vanguard Total Bond Market
-    "BNDX": "etf_scraper",   # Vanguard Total International Bond
-    "VNQ":  "etf_scraper",   # Vanguard Real Estate
-    "VIG":  "etf_scraper",   # Vanguard Dividend Appreciation
-    "VYM":  "etf_scraper",   # Vanguard High Dividend Yield
-    "VGT":  "etf_scraper",   # Vanguard Information Technology
-    "VUG":  "etf_scraper",   # Vanguard Growth
-    "VTV":  "etf_scraper",   # Vanguard Value
-    "VB":   "etf_scraper",   # Vanguard Small-Cap
-    "VO":   "etf_scraper",   # Vanguard Mid-Cap
-    "VXUS": "etf_scraper",   # Vanguard Total International Stock
+    "VOO":  "vanguard",   # Vanguard S&P 500
+    "VTI":  "vanguard",   # Vanguard Total Stock Market
+    "VEA":  "vanguard",   # Vanguard FTSE Developed Markets
+    "VWO":  "vanguard",   # Vanguard FTSE Emerging Markets
+    "BND":  "vanguard",   # Vanguard Total Bond Market
+    "BNDX": "vanguard",   # Vanguard Total International Bond
+    "VNQ":  "vanguard",   # Vanguard Real Estate
+    "VIG":  "vanguard",   # Vanguard Dividend Appreciation
+    "VYM":  "vanguard",   # Vanguard High Dividend Yield
+    "VGT":  "vanguard",   # Vanguard Information Technology
+    "VUG":  "vanguard",   # Vanguard Growth
+    "VTV":  "vanguard",   # Vanguard Value
+    "VB":   "vanguard",   # Vanguard Small-Cap
+    "VO":   "vanguard",   # Vanguard Mid-Cap
+    "VXUS": "vanguard",   # Vanguard Total International Stock
 
     # ── Invesco ───────────────────────────────────────────────────────────────
-    "QQQ":  "etf_scraper",   # Invesco QQQ (Nasdaq-100)
-    "QQQM": "etf_scraper",   # Invesco Nasdaq-100 (smaller share class)
-    "RSP":  "etf_scraper",   # Invesco S&P 500 Equal Weight
+    "QQQ":  "invesco",   # Invesco QQQ (Nasdaq-100)
+    "QQQM": "invesco",   # Invesco Nasdaq-100 (smaller share class)
+    "RSP":  "invesco",   # Invesco S&P 500 Equal Weight
 
     # ── ARK Invest — direct CSV download ─────────────────────────────────────
-    "ARKK": "ark",           # ARK Innovation
-    "ARKW": "ark",           # ARK Next Generation Internet
-    "ARKG": "ark",           # ARK Genomic Revolution
-    "ARKF": "ark",           # ARK Fintech Innovation
-    "ARKQ": "ark",           # ARK Autonomous Technology & Robotics
+    "ARKK": "ark",   # ARK Innovation
+    "ARKW": "ark",   # ARK Next Generation Internet
+    "ARKG": "ark",   # ARK Genomic Revolution
+    "ARKF": "ark",   # ARK Fintech Innovation
 
     # ── Alpha Vantage — niche / custom ETFs ──────────────────────────────────
-    # These aren't covered by etf-scraper (smaller or non-standard providers).
     # Each call costs 1 of your 25 free daily API calls.
     "ARTY": "alphavantage",
-    "IETC": "alphavantage",  # will be tried via etf_scraper first above;
-    "KWEB": "alphavantage",  # KraneShares China Internet
+    "IETC": "alphavantage",
+    "KWEB": "alphavantage",   # KraneShares China Internet
     "QBIG": "alphavantage",
-    "RTH":  "alphavantage",  # VanEck Retail
+    "RTH":  "alphavantage",   # VanEck Retail
     "TOLL": "alphavantage",
     "TOPT": "alphavantage",
     "XMAG": "alphavantage",
-    "SCHD": "alphavantage",  # Schwab US Dividend Equity
-    "JEPI": "alphavantage",  # JPMorgan Equity Premium Income
-    "JEPQ": "alphavantage",  # JPMorgan Nasdaq Equity Premium Income
+    "SCHD": "alphavantage",   # Schwab US Dividend Equity
+    "JEPI": "alphavantage",   # JPMorgan Equity Premium Income
+    "JEPQ": "alphavantage",   # JPMorgan Nasdaq Equity Premium Income
 }
+
+# ── Provider data maps ────────────────────────────────────────────────────────
 
 ARK_FILENAMES = {
     "ARKK": "ARK_INNOVATION_ETF_ARKK_HOLDINGS",
     "ARKW": "ARK_NEXT_GENERATION_INTERNET_ETF_ARKW_HOLDINGS",
     "ARKG": "ARK_GENOMIC_REVOLUTION_ETF_ARKG_HOLDINGS",
     "ARKF": "ARK_FINTECH_INNOVATION_ETF_ARKF_HOLDINGS",
-    "ARKQ": "ARK_AUTONOMOUS_TECHNOLOGY_%26_ROBOTICS_ETF_ARKQ_HOLDINGS",
 }
 
-# ── Provider fetchers ────────────────────────────────────────────────────────
+# portIds from the Vanguard internal API URL (visible in prior error messages)
+VANGUARD_PORT_IDS = {
+    "VOO":  "0968", "VTI":  "0970", "VEA":  "0936", "VWO":  "0964",
+    "BND":  "0928", "BNDX": "3711", "VNQ":  "0986", "VIG":  "0920",
+    "VYM":  "0923", "VGT":  "0958", "VUG":  "0967", "VTV":  "0966",
+    "VB":   "0969", "VO":   "0939", "VXUS": "3369",
+}
 
-_scraper = None  # lazy-init so import-time errors don't block the whole script
+# iShares product page IDs (from ishares.com/us/products/{id}/)
+ISHARES_PRODUCT_IDS = {
+    "IVV":  "239726", "IJH":  "239764", "IJR":  "239774", "IWM":  "239710",
+    "IWB":  "239707", "IWF":  "239708", "IWD":  "239706", "EFA":  "239623",
+    "EEM":  "239637", "IEMG": "244048", "AGG":  "239458", "LQD":  "239566",
+    "HYG":  "239565", "TLT":  "239454", "IAU":  "239597", "IBB":  "239699",
+    "SOXX": "239705",
+}
 
-def get_scraper():
-    global _scraper
-    if _scraper is None:
-        _scraper = ETFScraper()
-    return _scraper
-
+# ── Shared helpers ────────────────────────────────────────────────────────────
 
 def _df_to_holdings(df: pd.DataFrame) -> list:
-    """Normalize an etf-scraper DataFrame to {asset, name, weightPercentage}."""
+    """Normalize a DataFrame to [{asset, name, weightPercentage}]."""
     col_lower = {c.lower().strip(): c for c in df.columns}
 
     def find(*candidates):
@@ -218,11 +226,9 @@ def _df_to_holdings(df: pd.DataFrame) -> list:
         name = str(row[name_col]).strip() if name_col and pd.notna(row.get(name_col)) else ""
         holdings.append({"asset": sym, "name": name, "weightPercentage": weight})
 
-    # Some providers return decimal fractions (0.0721) rather than percentages (7.21).
-    # Detect by checking whether the total across all holdings is close to 1 vs 100.
     if holdings:
         total = sum(h["weightPercentage"] for h in holdings)
-        if total < 5:  # looks like decimals
+        if total < 5:  # decimal fractions → convert to percentages
             for h in holdings:
                 h["weightPercentage"] = round(h["weightPercentage"] * 100, 6)
         else:
@@ -232,10 +238,105 @@ def _df_to_holdings(df: pd.DataFrame) -> list:
     return holdings
 
 
-def fetch_etf_scraper(ticker: str) -> list:
-    df = get_scraper().query_holdings(ticker)
-    if df is None or df.empty:
-        raise ValueError("empty DataFrame returned")
+def _find_csv_header(lines: list) -> int:
+    """Return the index of the line that looks like a CSV column header."""
+    KEYS = ("ticker", "symbol", "weight", "cusip", "isin", "holding", "shares")
+    for i, line in enumerate(lines):
+        lower = line.lower()
+        if sum(1 for k in KEYS if k in lower) >= 2:
+            return i
+    return 0
+
+
+# ── Provider fetchers ─────────────────────────────────────────────────────────
+
+def fetch_ishares(ticker: str) -> list:
+    """
+    Load the iShares product page via Playwright (bypasses Cloudflare), then
+    fetch the holdings CSV using the session cookies that were set.
+    """
+    prod_id = ISHARES_PRODUCT_IDS.get(ticker)
+    if not prod_id:
+        raise ValueError(f"No product ID for iShares {ticker}")
+
+    from playwright.sync_api import sync_playwright
+
+    product_url = f"https://www.ishares.com/us/products/{prod_id}/"
+    csv_url = (
+        f"https://www.ishares.com/us/products/{prod_id}/{ticker.lower()}"
+        f"/1467271812596.ajax?tab=all&fileType=csv&dataType=fund"
+    )
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        ctx = browser.new_context(user_agent=UA)
+        page = ctx.new_page()
+        page.goto(product_url, wait_until="networkidle", timeout=90_000)
+        resp = page.request.get(csv_url, headers={"Referer": product_url})
+        content = resp.text()
+        browser.close()
+
+    lines = content.splitlines()
+    if len(lines) < 5 or (lines and "<html" in lines[0].lower()):
+        raise ValueError("Got HTML instead of CSV — Cloudflare may still be blocking")
+
+    header = _find_csv_header(lines)
+    df = pd.read_csv(io.StringIO("\n".join(lines[header:])))
+    return _df_to_holdings(df)
+
+
+def fetch_ssga(ticker: str) -> list:
+    """Direct XLSX download from ssga.com — no bot detection on this endpoint."""
+    url = (
+        f"https://www.ssga.com/library-content/products/fund-data/etfs/us"
+        f"/holdings-daily-us-en-{ticker.lower()}.xlsx"
+    )
+    r = requests.get(url, headers={"User-Agent": UA}, timeout=30)
+    r.raise_for_status()
+    buf = io.BytesIO(r.content)
+    # SSGA XLSXs have 3–4 metadata rows before the column header; try each.
+    for skip in (3, 4, 2, 5, 1, 0):
+        buf.seek(0)
+        try:
+            df = pd.read_excel(buf, skiprows=skip, engine="openpyxl")
+            if df.empty or len(df.columns) < 2:
+                continue
+            holdings = _df_to_holdings(df)
+            if holdings:
+                return holdings
+        except Exception:
+            pass
+    raise ValueError(f"Could not parse SSGA XLSX for {ticker}")
+
+
+def fetch_vanguard(ticker: str) -> list:
+    """Direct CSV download from the Vanguard fund portal using the portId."""
+    port_id = VANGUARD_PORT_IDS.get(ticker)
+    if not port_id:
+        raise ValueError(f"No portId mapping for Vanguard {ticker}")
+    url = (
+        f"https://www.vanguard.com/us/portal/fund/portfolio-holdings-download"
+        f"?portId={port_id}&filetype=csv&portType=fund"
+    )
+    r = requests.get(url, headers={"User-Agent": UA}, timeout=30)
+    r.raise_for_status()
+    lines = r.text.splitlines()
+    header = _find_csv_header(lines)
+    df = pd.read_csv(io.StringIO("\n".join(lines[header:])))
+    return _df_to_holdings(df)
+
+
+def fetch_invesco(ticker: str) -> list:
+    """Direct CSV download from invesco.com; auto-detects the header row."""
+    url = (
+        f"https://www.invesco.com/us/financial-products/etfs/holdings"
+        f"/main/holdings/0?audienceType=Investor&ticker={ticker}"
+    )
+    r = requests.get(url, headers={"User-Agent": UA}, timeout=30)
+    r.raise_for_status()
+    lines = r.text.splitlines()
+    header = _find_csv_header(lines)
+    df = pd.read_csv(io.StringIO("\n".join(lines[header:])))
     return _df_to_holdings(df)
 
 
@@ -244,7 +345,7 @@ def fetch_ark(ticker: str) -> list:
     if not filename:
         raise ValueError(f"No ARK filename mapping for {ticker}")
     url = f"https://assets.ark-funds.com/fund-documents/funds-etf-csv/{filename}.csv"
-    r   = requests.get(url, headers={"User-Agent": UA}, timeout=30)
+    r = requests.get(url, headers={"User-Agent": UA}, timeout=30)
     r.raise_for_status()
 
     holdings = []
@@ -287,10 +388,13 @@ def fetch_alphavantage(ticker: str) -> list:
     return holdings
 
 
-# ── Main ─────────────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 FETCHERS = {
-    "etf_scraper":  fetch_etf_scraper,
+    "ishares":      fetch_ishares,
+    "ssga":         fetch_ssga,
+    "vanguard":     fetch_vanguard,
+    "invesco":      fetch_invesco,
     "ark":          fetch_ark,
     "alphavantage": fetch_alphavantage,
 }
@@ -298,8 +402,8 @@ FETCHERS = {
 
 def main():
     if CACHE_FILE.exists():
-        raw = CACHE_FILE.read_bytes().lstrip(b'\xef\xbb\xbf')  # strip UTF-8 BOM if present
-        cache = json.loads(raw.decode('utf-8'))
+        raw = CACHE_FILE.read_bytes().lstrip(b"\xef\xbb\xbf")
+        cache = json.loads(raw.decode("utf-8"))
     else:
         cache = {"version": 1, "holdings": {}}
 
@@ -307,10 +411,7 @@ def main():
     av_calls = 0
     success, failed = [], []
 
-    # Deduplicate — IETC appears in both etf_scraper and alphavantage sections
-    # above; etf_scraper wins because it comes first in the dict.
-    seen = set()
-    etf_list = []
+    seen, etf_list = set(), []
     for ticker, provider in ETF_CONFIG.items():
         if ticker not in seen:
             seen.add(ticker)
