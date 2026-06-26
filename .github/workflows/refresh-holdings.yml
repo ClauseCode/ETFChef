@@ -1,0 +1,39 @@
+name: Refresh ETF Holdings Cache
+
+on:
+  schedule:
+    - cron: "0 2 * * 0"   # Every Sunday at 02:00 UTC
+  workflow_dispatch:        # Allow manual trigger from GitHub Actions UI
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # Needed to push the updated holdings-cache.json
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install requests openpyxl
+
+      - name: Refresh holdings
+        env:
+          ALPHA_VANTAGE_KEY: ${{ secrets.ALPHA_VANTAGE_KEY }}
+        run: python scripts/refresh_holdings.py
+
+      - name: Commit updated cache
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add holdings-cache.json
+          git diff --cached --quiet && echo "No changes — cache already up to date." || (
+            git commit -m "Auto-refresh ETF holdings cache ($(date -u +%Y-%m-%d))"
+            git push
+          )
