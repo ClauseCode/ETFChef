@@ -2,8 +2,10 @@ name: Refresh ETF Holdings Cache
 
 on:
   schedule:
-    - cron: "0 2 * * 0"   # Every Sunday at 02:00 UTC
-  workflow_dispatch:        # Allow manual trigger from GitHub Actions UI
+    - cron: "0 2 * * 0,3"   # Sundays and Wednesdays at 02:00 UTC — twice
+                            # weekly so the Alpha Vantage 25-call/day
+                            # rotation covers every AV ticker within days
+  workflow_dispatch:          # Allow manual trigger from GitHub Actions UI
 
 jobs:
   refresh:
@@ -21,22 +23,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install Python dependencies
-        run: pip install requests pandas openpyxl playwright
-
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        id: playwright-cache
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-chromium-${{ runner.os }}-v2
-
-      - name: Install Playwright Chromium
-        if: steps.playwright-cache.outputs.cache-hit != 'true'
-        run: playwright install chromium --with-deps
-
-      - name: Install Chromium system deps (cached run)
-        if: steps.playwright-cache.outputs.cache-hit == 'true'
-        run: playwright install-deps chromium
+        run: pip install requests pandas openpyxl
 
       - name: Refresh holdings
         env:

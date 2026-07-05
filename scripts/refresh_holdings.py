@@ -7,16 +7,21 @@ GitHub Actions: triggered weekly; ALPHA_VANTAGE_KEY set as repo secret
 
 Providers
 ---------
-ishares       iShares (BlackRock) — Playwright loads product page, then fetches CSV
-              via in-browser fetch() to bypass Cloudflare bot detection
-ssga          SSGA/SPDR — direct XLSX download from ssga.com (no bot detection)
-vanguard      Vanguard — Playwright loads portal page, then fetches CSV via
-              in-browser fetch() (download endpoint requires browser session)
-invesco       Invesco — Playwright loads ETF page, then fetches CSV via
-              in-browser fetch() (direct requests return 406)
-ark           ARK Invest public CSV — no auth, no browser
-alphavantage  Alpha Vantage ETF_PROFILE API — fallback for niche ETFs
-              (25 calls/day on free tier)
+ssga          SSGA/SPDR — direct XLSX download from ssga.com
+vanguard      Vanguard — public JSON API on investor.vanguard.com
+              (/vmf/api/{TICKER}/portfolio-holding/stock.json, paginated)
+ark           ARK Invest public CSV
+alphavantage  Alpha Vantage ETF_PROFILE API — used for providers whose sites
+              block scraping (iShares/Akamai, Invesco). Free tier allows
+              25 calls/day; the script refreshes the stalest 25 per run and
+              defers the rest to the next run.
+
+No browser automation: iShares and Invesco direct scraping were abandoned —
+Akamai serves the product page instead of the CSV no matter what (headless
+browsers get "Access Denied"; plain requests get a soft fallback), and those
+tickers work fine through Alpha Vantage. Bond/commodity funds (GLD, AGG, TLT,
+LQD, HYG, IAU, BND, BNDX) are omitted entirely: they hold no stocks, so they
+contribute nothing to stock-level exposure.
 
 To add a new ETF, add one line to ETF_CONFIG below and pick a provider.
 """
@@ -48,23 +53,19 @@ UA         = (
 
 ETF_CONFIG = {
 
-    # ── iShares (BlackRock) ───────────────────────────────────────────────────
-    "IVV":  "ishares",   # iShares Core S&P 500
-    "IJH":  "ishares",   # iShares Core S&P Mid-Cap
-    "IJR":  "ishares",   # iShares Core S&P Small-Cap
+    # ── iShares (BlackRock) — via Alpha Vantage (ishares.com blocks scraping) ─
+    # AGG/LQD/HYG/TLT (bonds) and IAU (gold) omitted: no stock holdings.
+    "IVV":  "alphavantage",   # iShares Core S&P 500
+    "IJH":  "alphavantage",   # iShares Core S&P Mid-Cap
+    "IJR":  "alphavantage",   # iShares Core S&P Small-Cap
     "IWM":  "alphavantage",   # iShares Russell 2000
-    "IWB":  "ishares",   # iShares Russell 1000
-    "IWF":  "ishares",   # iShares Russell 1000 Growth
-    "IWD":  "ishares",   # iShares Russell 1000 Value
-    "EFA":  "ishares",   # iShares MSCI EAFE
-    "EEM":  "ishares",   # iShares MSCI Emerging Markets
-    "IEMG": "ishares",   # iShares Core MSCI Emerging Markets
-    "AGG":  "ishares",   # iShares Core US Aggregate Bond
-    "LQD":  "ishares",   # iShares iBoxx IG Corporate Bond
-    "HYG":  "ishares",   # iShares iBoxx HY Corporate Bond
-    "TLT":  "ishares",   # iShares 20+ Year Treasury Bond
-    "IAU":  "ishares",   # iShares Gold Trust
-    "IBB":  "ishares",   # iShares Biotechnology
+    "IWB":  "alphavantage",   # iShares Russell 1000
+    "IWF":  "alphavantage",   # iShares Russell 1000 Growth
+    "IWD":  "alphavantage",   # iShares Russell 1000 Value
+    "EFA":  "alphavantage",   # iShares MSCI EAFE
+    "EEM":  "alphavantage",   # iShares MSCI Emerging Markets
+    "IEMG": "alphavantage",   # iShares Core MSCI Emerging Markets
+    "IBB":  "alphavantage",   # iShares Biotechnology
     "SOXX": "alphavantage",   # iShares Semiconductor
 
     # ── SSGA / SPDR ───────────────────────────────────────────────────────────
@@ -126,13 +127,12 @@ ETF_CONFIG = {
     "XITK": "ssga",   # SPDR FactSet Innovative Technology
     "XTL":  "ssga",   # SPDR S&P Telecom
 
-    # ── Vanguard ──────────────────────────────────────────────────────────────
+    # ── Vanguard — public JSON API ────────────────────────────────────────────
+    # BND/BNDX (bond funds) omitted: no stock holdings.
     "VOO":  "vanguard",   # Vanguard S&P 500
     "VTI":  "vanguard",   # Vanguard Total Stock Market
     "VEA":  "vanguard",   # Vanguard FTSE Developed Markets
     "VWO":  "vanguard",   # Vanguard FTSE Emerging Markets
-    "BND":  "vanguard",   # Vanguard Total Bond Market
-    "BNDX": "vanguard",   # Vanguard Total International Bond
     "VNQ":  "vanguard",   # Vanguard Real Estate
     "VIG":  "vanguard",   # Vanguard Dividend Appreciation
     "VYM":  "vanguard",   # Vanguard High Dividend Yield
@@ -177,134 +177,6 @@ ARK_FILENAMES = {
     "ARKG": "ARK_GENOMIC_REVOLUTION_ETF_ARKG_HOLDINGS",
     "ARKF": "ARK_FINTECH_INNOVATION_ETF_ARKF_HOLDINGS",
 }
-
-# portIds from the Vanguard internal API URL (visible in prior error messages)
-VANGUARD_PORT_IDS = {
-    "VOO":  "0968", "VTI":  "0970", "VEA":  "0936", "VWO":  "0964",
-    "BND":  "0928", "BNDX": "3711", "VNQ":  "0986", "VIG":  "0920",
-    "VYM":  "0923", "VGT":  "0958", "VUG":  "0967", "VTV":  "0966",
-    "VB":   "0969", "VO":   "0939", "VXUS": "3369",
-}
-
-# iShares product page IDs (from ishares.com/us/products/{id}/)
-ISHARES_PRODUCT_IDS = {
-    "IVV":  "239726", "IJH":  "239764", "IJR":  "239774", "IWM":  "239710",
-    "IWB":  "239707", "IWF":  "239708", "IWD":  "239706", "EFA":  "239623",
-    "EEM":  "239637", "IEMG": "244048", "AGG":  "239458", "LQD":  "239566",
-    "HYG":  "239565", "TLT":  "239454", "IAU":  "239597", "IBB":  "239699",
-    "SOXX": "239705",
-}
-
-# ── Shared Playwright state ───────────────────────────────────────────────────
-# One browser process; separate browser contexts per provider so that cookies
-# don't cross-contaminate.  page.evaluate(fetch(...)) is used rather than
-# page.request.get() because the former runs inside the browser's JS engine
-# (full Cloudflare / bot-detection fingerprint), while the latter is an
-# out-of-process HTTP request that Cloudflare can distinguish and block.
-
-_pw_instance = None
-_pw_browser  = None
-
-def _get_pw_browser():
-    global _pw_instance, _pw_browser
-    if _pw_browser is None:
-        from playwright.sync_api import sync_playwright
-        _pw_instance = sync_playwright().start()
-        _pw_browser = _pw_instance.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-                "--window-size=1920,1080",
-            ],
-        )
-    return _pw_browser
-
-
-def _make_ctx(warmup_url: str):
-    """Create a new browser context and pre-warm it by loading warmup_url."""
-    ctx = _get_pw_browser().new_context(
-        user_agent=UA,
-        viewport={"width": 1920, "height": 1080},
-        locale="en-US",
-        timezone_id="America/New_York",
-        extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
-    )
-    # Patch navigator.webdriver so Cloudflare/bot-detection sees a real browser
-    ctx.add_init_script("Object.defineProperty(navigator,'webdriver',{get:()=>undefined})")
-    page = ctx.new_page()
-    try:
-        page.goto(warmup_url, wait_until="domcontentloaded", timeout=60_000)
-    finally:
-        page.close()
-    return ctx
-
-
-def _browser_fetch(ctx, navigate_url: str, fetch_url: str) -> str:
-    """Navigate to navigate_url, then fetch fetch_url from within the browser.
-
-    Uses page.evaluate(fetch()) instead of page.request.get() so the request
-    runs inside the browser's JS engine — full TLS fingerprint, Cloudflare
-    cookies, and bot-challenge tokens all apply automatically.
-    """
-    page = ctx.new_page()
-    try:
-        page.goto(navigate_url, wait_until="domcontentloaded", timeout=60_000)
-        result = page.evaluate(
-            """
-            async (url) => {
-                try {
-                    const r = await fetch(url, {credentials: 'include'});
-                    const text = await r.text();
-                    return {ok: true, status: r.status, text};
-                } catch (e) {
-                    return {ok: false, error: e.toString()};
-                }
-            }
-            """,
-            fetch_url,
-        )
-    finally:
-        page.close()
-
-    if not result["ok"]:
-        raise ValueError(f"in-browser fetch() threw: {result['error']}")
-    status = result["status"]
-    text   = result["text"]
-    if status != 200:
-        preview = repr(text[:300])
-        raise ValueError(f"HTTP {status} from fetch() — preview: {preview}")
-    return text
-
-
-_ishares_ctx = None
-_vanguard_ctx = None
-_invesco_ctx  = None
-
-
-def _get_ishares_ctx():
-    global _ishares_ctx
-    if _ishares_ctx is None:
-        _ishares_ctx = _make_ctx("https://www.ishares.com/us/")
-    return _ishares_ctx
-
-
-def _get_vanguard_ctx():
-    global _vanguard_ctx
-    if _vanguard_ctx is None:
-        # investor.vanguard.com is the public-facing site (no login required);
-        # www.vanguard.com/us/portal/ is their authenticated investor portal.
-        _vanguard_ctx = _make_ctx("https://investor.vanguard.com/")
-    return _vanguard_ctx
-
-
-def _get_invesco_ctx():
-    global _invesco_ctx
-    if _invesco_ctx is None:
-        _invesco_ctx = _make_ctx("https://www.invesco.com/us/")
-    return _invesco_ctx
-
 
 # ── Shared helpers ────────────────────────────────────────────────────────────
 
@@ -363,28 +235,6 @@ def _find_csv_header(lines: list) -> int:
 
 # ── Provider fetchers ─────────────────────────────────────────────────────────
 
-def fetch_ishares(ticker: str) -> list:
-    prod_id = ISHARES_PRODUCT_IDS.get(ticker)
-    if not prod_id:
-        raise ValueError(f"No product ID for iShares {ticker}")
-
-    product_url = f"https://www.ishares.com/us/products/{prod_id}/"
-    csv_url = (
-        f"https://www.ishares.com/us/products/{prod_id}/{ticker.lower()}"
-        f"/1467271812596.ajax?tab=all&fileType=csv&dataType=fund"
-    )
-
-    content = _browser_fetch(_get_ishares_ctx(), product_url, csv_url)
-
-    if "<html" in content[:200].lower():
-        raise ValueError("Got HTML — Cloudflare still blocking CSV endpoint")
-
-    lines = content.splitlines()
-    header = _find_csv_header(lines)
-    df = pd.read_csv(io.StringIO("\n".join(lines[header:])), on_bad_lines="skip", engine="python")
-    return _df_to_holdings(df)
-
-
 def fetch_ssga(ticker: str) -> list:
     """Direct XLSX download from ssga.com — no bot detection on this endpoint."""
     url = (
@@ -410,123 +260,40 @@ def fetch_ssga(ticker: str) -> list:
 
 
 def fetch_vanguard(ticker: str) -> list:
-    port_id = VANGUARD_PORT_IDS.get(ticker)
-    if not port_id:
-        raise ValueError(f"No portId mapping for Vanguard {ticker}")
+    """Public JSON API used by investor.vanguard.com fund profile pages.
 
-    # The authenticated portal download URL is auth-walled.
-    # Instead: load the PUBLIC investor profile page and intercept the XHR
-    # calls it makes for portfolio composition data.
-    profile_url = f"https://investor.vanguard.com/investment-products/etfs/profile/{ticker.lower()}"
+    Plain requests, no auth, no browser. Paginated at 500 rows;
+    percentWeight is already a percentage string (e.g. "7.89").
+    """
+    url = f"https://investor.vanguard.com/vmf/api/{ticker.upper()}/portfolio-holding/stock.json"
+    headers = {"User-Agent": UA, "Accept": "application/json"}
 
-    ctx = _get_vanguard_ctx()
-    page = ctx.new_page()
-    captured: list = []
-
-    def on_response(response):
-        url = response.url
-        # Capture any JSON response that mentions "holding" or "portfolio"
-        # from Vanguard's API domain.
-        if "vanguard.com" in url and response.status == 200:
-            if any(k in url.lower() for k in ("holding", "portfolio", "composition")):
-                try:
-                    captured.append(response.json())
-                except Exception:
-                    pass
-
-    page.on("response", on_response)
-    try:
-        page.goto(profile_url, wait_until="networkidle", timeout=90_000)
-    finally:
-        page.close()
-
-    # Look for a holdings-like structure in any captured JSON
-    for blob in captured:
-        holdings = _parse_vanguard_json(blob)
-        if holdings:
-            return holdings
-
-    raise ValueError(
-        f"No holdings data captured from Vanguard profile page "
-        f"(captured {len(captured)} JSON responses — "
-        f"may need a different URL pattern)"
-    )
-
-
-def _parse_vanguard_json(blob) -> list:
-    """Try to extract [{asset, name, weightPercentage}] from Vanguard API JSON."""
-    if not isinstance(blob, dict):
-        return []
-
-    # Common Vanguard API shapes:
-    # {"fundHoldings": [...]}
-    # {"portfolioHoldings": [...]}
-    # {"holdings": [...]}
-    for key in ("fundHoldings", "portfolioHoldings", "holdings", "equityHoldings"):
-        raw = blob.get(key)
-        if isinstance(raw, list) and raw:
-            return _normalise_vanguard_holdings(raw)
-
-    # Recurse one level into nested dicts
-    for val in blob.values():
-        if isinstance(val, dict):
-            result = _parse_vanguard_json(val)
-            if result:
-                return result
-
-    return []
-
-
-def _normalise_vanguard_holdings(rows: list) -> list:
-    """Normalise a list of Vanguard holding dicts."""
-    result = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        sym = (
-            row.get("ticker") or row.get("symbol") or row.get("securityTicker") or ""
-        ).strip().upper()
-        if not sym or sym in {"N/A", "CASH", ""}:
-            continue
-        weight = None
-        for wkey in ("percentWeight", "weight", "percentOfFund", "pctFund", "holdingPercent"):
-            v = row.get(wkey)
-            if v is not None:
-                try:
-                    weight = float(v)
-                    break
-                except (ValueError, TypeError):
-                    pass
-        if weight is None or abs(weight) < 1e-9:
-            continue
-        name = (row.get("longName") or row.get("name") or row.get("securityName") or "").strip()
-        result.append({"asset": sym, "name": name, "weightPercentage": round(weight, 6)})
-
-    if result:
-        total = sum(h["weightPercentage"] for h in result)
-        if total < 5:  # decimal fractions → percentages
-            for h in result:
-                h["weightPercentage"] = round(h["weightPercentage"] * 100, 6)
-
-    return result
-
-
-def fetch_invesco(ticker: str) -> list:
-    etf_url = (
-        f"https://www.invesco.com/us/financial-products/etfs/etf-details"
-        f"?audienceType=Investor&ticker={ticker}"
-    )
-    csv_url = (
-        f"https://www.invesco.com/us/financial-products/etfs/holdings"
-        f"/main/holdings/0?audienceType=Investor&ticker={ticker}"
-    )
-
-    content = _browser_fetch(_get_invesco_ctx(), etf_url, csv_url)
-
-    lines = content.splitlines()
-    header = _find_csv_header(lines)
-    df = pd.read_csv(io.StringIO("\n".join(lines[header:])), on_bad_lines="skip", engine="python")
-    return _df_to_holdings(df)
+    holdings, start = [], 1
+    while True:
+        r = requests.get(url, params={"start": start, "count": 500},
+                         headers=headers, timeout=30)
+        r.raise_for_status()
+        data = r.json()
+        rows = (data.get("fund") or {}).get("entity") or []
+        if not rows:
+            break
+        for row in rows:
+            sym = (row.get("ticker") or "").strip().upper()
+            if not sym or sym in {"N/A", "CASH"}:
+                continue
+            try:
+                weight = float(row.get("percentWeight") or 0)
+            except (ValueError, TypeError):
+                continue
+            if abs(weight) < 1e-9:
+                continue
+            name = (row.get("longName") or row.get("shortName") or "").strip()
+            holdings.append({"asset": sym, "name": name, "weightPercentage": round(weight, 6)})
+        size = int(data.get("size") or 0)
+        start += len(rows)
+        if start > size:
+            break
+    return holdings
 
 
 def fetch_ark(ticker: str) -> list:
@@ -580,13 +347,16 @@ def fetch_alphavantage(ticker: str) -> list:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 FETCHERS = {
-    "ishares":      fetch_ishares,
     "ssga":         fetch_ssga,
     "vanguard":     fetch_vanguard,
-    "invesco":      fetch_invesco,
     "ark":          fetch_ark,
     "alphavantage": fetch_alphavantage,
 }
+
+# Alpha Vantage free tier allows 25 calls/day. If more AV tickers are
+# configured, each run refreshes the stalest 25 and defers the rest to the
+# next run — with the twice-weekly schedule everything stays under a week old.
+MAX_AV_PER_RUN = 25
 
 
 def main():
@@ -598,7 +368,7 @@ def main():
 
     now      = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
     av_calls = 0
-    success, failed = [], []
+    success, failed, deferred = [], [], []
 
     seen, etf_list = set(), []
     for ticker, provider in ETF_CONFIG.items():
@@ -606,8 +376,20 @@ def main():
             seen.add(ticker)
             etf_list.append((ticker, provider))
 
+    # AV budget: refresh the stalest tickers first (never-fetched sorts first)
+    av_tickers = [t for t, p in etf_list if p == "alphavantage"]
+    av_sorted  = sorted(av_tickers,
+                        key=lambda t: cache["holdings"].get(t, {}).get("fetchedAt", ""))
+    av_budget  = set(av_sorted[:MAX_AV_PER_RUN])
+
     for ticker, provider in etf_list:
         print(f"  [{provider:>12}] {ticker:<6} ... ", end="", flush=True)
+
+        if provider == "alphavantage" and ticker not in av_budget:
+            print("deferred (AV daily quota)")
+            deferred.append(ticker)
+            continue
+
         try:
             if provider == "alphavantage":
                 if av_calls > 0:
@@ -630,11 +412,13 @@ def main():
         json.dump(cache, f, indent=2, ensure_ascii=False)
 
     print(f"\n{'─'*52}")
-    print(f"Updated: {len(success)}   Failed: {len(failed)}")
+    print(f"Updated: {len(success)}   Failed: {len(failed)}   Deferred: {len(deferred)}")
     if failed:
         print("Failed:")
         for t, err in failed:
             print(f"  {t}: {err}")
+    if deferred:
+        print(f"Deferred to next run (AV quota): {' '.join(deferred)}")
 
     if len(success) == 0:
         sys.exit(1)
