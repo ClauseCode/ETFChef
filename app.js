@@ -778,15 +778,273 @@ function renderNaNotice(containerEl, etfList) {
   containerEl.classList.remove('hidden');
 }
 
-// Generate all k-combinations from array
-function combinations(arr, k) {
-  if (k === 0) return [[]];
-  if (k > arr.length) return [];
-  const out = [];
-  for (let i = 0; i <= arr.length - k; i++) {
-    for (const rest of combinations(arr.slice(i + 1), k - 1)) out.push([arr[i], ...rest]);
+// ── Continuous-weight optimizer ────────────────────────────
+// Leg sizes are continuous weights solved by a small linear program rather
+// than the old fixed equal-weight (±1/k) enumeration. ETF selection is
+// greedy forward selection, so cost grows linearly with the number of
+// selected ETFs instead of exponentially with max legs.
+//
+//   absolute mode:  max targetExp  s.t. |exp_j| ≤ cap_j (j ≠ target),
+//                                       Σ|w_i| ≤ 1
+//   relative mode:  max targetExp  s.t. |exp_j| ≤ 1 — the ratio
+//                   targetExp/maxOther is scale-invariant, so maximizing
+//                   with "other" normalized to 1 maximizes the ratio; the
+//                   solution is then rescaled to respect gross ≤ 1 and
+//                   the absolute caps.
+
+// Primal simplex for  max c·x  s.t.  A·x ≤ b, x ≥ 0  with all b ≥ 0
+// (slack basis is feasible, so no phase-1 needed). Bland's rule — immune
+// to cycling; problems here are tiny so its slower pivoting cost is moot.
+// Returns the solution vector x, or null if unbounded.
+function simplexMax(c, A, b) {
+  const m = A.length, n = c.length, W = n + m + 1;
+  const T = [];
+  for (let i = 0; i < m; i++) {
+    const row = new Float64Array(W);
+    row.set(A[i]);
+    row[n + i] = 1;
+    row[W - 1] = b[i];
+    T.push(row);
   }
-  return out;
+  const obj = new Float64Array(W);
+  for (let j = 0; j < n; j++) obj[j] = -c[j];
+  T.push(obj);
+
+  const basis = new Int32Array(m);
+  for (let i = 0; i < m; i++) basis[i] = n + i;
+
+  const EPS = 1e-9;
+  for (let iter = 0; iter < 600; iter++) {
+    let col = -1;
+    for (let j = 0; j < W - 1; j++) if (T[m][j] < -EPS) { col = j; break; }
+    if (col === -1) break; // optimal
+
+    let row = -1, minRatio = Infinity;
+    for (let i = 0; i < m; i++) {
+      const a = T[i][col];
+      if (a > EPS) {
+        const r = T[i][W - 1] / a;
+        if (r < minRatio - EPS || (r < minRatio + EPS && row !== -1 && basis[i] < basis[row])) {
+          minRatio = r; row = i;
+        }
+      }
+    }
+    if (row === -1) return null; // unbounded
+
+    const pr = T[row], pv = pr[col];
+    for (let j = 0; j < W; j++) pr[j] /= pv;
+    for (let i = 0; i <= m; i++) {
+      if (i === row) continue;
+      const f = T[i][col];
+      if (f !== 0) for (let j = 0; j < W; j++) T[i][j] -= f * pr[j];
+    }
+    basis[row] = col;
+  }
+
+  const x = new Float64Array(n);
+  for (let i = 0; i < m; i++) if (basis[i] < n) x[basis[i]] = T[i][W - 1];
+  return x;
+}
+
+// Solve optimal continuous weights for a fixed set of ETFs (the "support").
+// Residual caps are enforced lazily (cutting planes): solve with the rows
+// found so far, sweep the full exposure vector for violations, add the
+// worst offenders as new rows, repeat. The final active set is tiny, so
+// each LP stays a few dozen rows regardless of how many tickers the ETFs
+// hold. Weights are free-sign via the u−v split, so long/short directions
+// come out of the solve — no sign enumeration.
+function solveSupport(ctx, support) {
+  const k = support.length, n = 2 * k;
+  const vecs = support.map(e => ctx.etfVecs[e]);
+  const { N, targetI, lims, scratch: exp } = ctx;
+  const relative = ctx.mode === 'relative';
+  // Relative solve is scale-free: the ratio optimum is where the maxOther
+  // normalization (|exp_j| ≤ 1) binds, not the gross bound. Start gross
+  // small and escalate if it binds first (well-hedged combos have tiny
+  // residuals per unit of gross, so the normalization can sit far out).
+  let grossMax = relative ? 10 : 1;
+
+  // objective: maximize target exposure; w_i split as u_i − v_i (both ≥ 0)
+  const c = new Float64Array(n);
+  for (let i = 0; i < k; i++) { c[i] = vecs[i][targetI]; c[k + i] = -vecs[i][targetI]; }
+
+  const A = [], b = [];
+  const addRow = (coef, rhs) => {
+    const row = new Float64Array(n);
+    for (let i = 0; i < k; i++) { const a = coef(i); row[i] = a; row[k + i] = -a; }
+    A.push(row); b.push(rhs);
+  };
+  A.push(new Float64Array(n).fill(1)); // gross: Σ(u+v) ≤ grossMax
+  b.push(grossMax);
+
+  const capAdded = new Set(), reqAdded = new Set();
+  const w = new Float64Array(k);
+
+  for (let round = 0; round < 24; round++) {
+    const x = simplexMax(c, A, b);
+    if (!x) return null;
+    for (let i = 0; i < k; i++) w[i] = x[i] - x[k + i];
+
+    exp.fill(0);
+    for (let i = 0; i < k; i++) {
+      const wi = w[i];
+      if (wi === 0) continue;
+      const v = vecs[i];
+      for (let j = 0; j < N; j++) exp[j] += wi * v[j];
+    }
+    const targetExp = exp[targetI];
+
+    const viols = [];
+    for (let j = 0; j < N; j++) {
+      if (j === targetI) continue;
+      const a = Math.abs(exp[j]);
+      const lim = relative ? 1 : lims[j];
+      if (a > lim + 1e-7 && !capAdded.has(j)) viols.push([j, a - lim, false]);
+      if (ctx.requireMax && a > targetExp + 1e-7 && !reqAdded.has(j)) viols.push([j, a - targetExp, true]);
+    }
+
+    if (viols.length === 0) {
+      let gross = 0;
+      for (let i = 0; i < k; i++) gross += Math.abs(w[i]);
+      let maxOther = 0;
+      for (let j = 0; j < N; j++) {
+        if (j !== targetI && Math.abs(exp[j]) > maxOther) maxOther = Math.abs(exp[j]);
+      }
+      // Relative mode: if the gross bound bound the solve instead of the
+      // maxOther normalization, the answer isn't ratio-optimal yet — widen
+      // the gross bound and continue (cut rows carry over).
+      if (relative && gross > grossMax * 0.999 && maxOther < 0.999 && grossMax < 1e7) {
+        grossMax *= 100;
+        b[0] = grossMax;
+        continue;
+      }
+      const out = { w: Float64Array.from(w), exp: Float64Array.from(exp), targetExp, gross, maxOther };
+      if (relative) rescaleRelative(ctx, out);
+      out.ratio = out.maxOther > 1e-12 ? out.targetExp / out.maxOther : Infinity;
+      return out;
+    }
+
+    viols.sort((p, q) => q[1] - p[1]);
+    for (const [j, , isReq] of viols.slice(0, 12)) {
+      if (isReq) {
+        reqAdded.add(j);
+        addRow(i => vecs[i][j] - vecs[i][targetI], 0);
+        addRow(i => -vecs[i][j] - vecs[i][targetI], 0);
+      } else {
+        capAdded.add(j);
+        const lim = relative ? 1 : lims[j];
+        addRow(i => vecs[i][j], lim);
+        addRow(i => -vecs[i][j], lim);
+      }
+    }
+  }
+  return null; // didn't converge — caller skips this support
+}
+
+// Relative-mode solutions come out normalized to maxOther = 1; scale the
+// whole position (ratio is unchanged along the ray) to the largest size
+// that respects the gross budget, the global cap, and per-ticker caps.
+function rescaleRelative(ctx, out) {
+  let scale = out.gross > 1e-12 ? 1 / out.gross : 1;
+  if (out.maxOther > 1e-12) scale = Math.min(scale, ctx.cap / out.maxOther);
+  for (const [tk, lim] of Object.entries(tickerCaps)) {
+    const j = ctx.tickerIdx[tk];
+    if (j !== undefined && j !== ctx.targetI) {
+      const a = Math.abs(out.exp[j]);
+      if (a > 1e-12) scale = Math.min(scale, lim / a);
+    }
+  }
+  if (scale === 1) return;
+  for (let i = 0; i < out.w.length; i++) out.w[i] *= scale;
+  for (let j = 0; j < out.exp.length; j++) out.exp[j] *= scale;
+  out.targetExp *= scale;
+  out.gross     *= scale;
+  out.maxOther  *= scale;
+}
+
+// Greedy forward selection: start from the best seed, then repeatedly add
+// the ETF whose optimal re-solve improves the objective most. Stops at
+// maxLegs or when the best addition improves the objective by <1% — the
+// anti-degeneracy guard that keeps answers tradeable instead of piling on
+// sliver legs for the last decimal.
+function optimizeContinuous(ctx, available, targetEtfs, maxLegs) {
+  const MIN_IMPROVE = 0.01;
+  const scoreOf = r => ctx.mode === 'relative' ? r.ratio : r.targetExp;
+
+  const evalBest = (supports) => {
+    let best = null, bestSup = null;
+    for (const sup of supports) {
+      const res = solveSupport(ctx, sup);
+      if (!res || res.targetExp <= 1e-9) continue;
+      if (!best || scoreOf(res) > scoreOf(best)) { best = res; bestSup = sup; }
+    }
+    return best ? { res: best, sup: bestSup } : null;
+  };
+
+  // Seed with the best single ETF; with "target must be max exposure" a
+  // single ETF is often infeasible (another holding outweighs the target),
+  // so fall back to seeding with the best (target ETF, hedge) pair.
+  let seed = evalBest(targetEtfs.map(e => [e]));
+  if (!seed && maxLegs >= 2) {
+    const pairs = [];
+    for (const t of targetEtfs) {
+      for (const e of available) if (e !== t) pairs.push([t, e]);
+    }
+    seed = evalBest(pairs);
+  }
+
+  // "Target must be max exposure" is scale-free, so for mid-weight stocks
+  // no support smaller than 3-4 legs is feasible at ANY size and the seeds
+  // above all fail. Bootstrap: grow a support on the unconstrained ratio
+  // objective — ratio > 1 is exactly "the requirement is satisfiable" —
+  // then hand that support to the real constrained solve.
+  if (!seed && ctx.requireMax && maxLegs >= 2) {
+    const feasCtx = { ...ctx, mode: 'relative', requireMax: false };
+    let sup = null, ratio = -Infinity;
+    for (const t of targetEtfs) {
+      const r = solveSupport(feasCtx, [t]);
+      if (r && r.ratio > ratio) { ratio = r.ratio; sup = [t]; }
+    }
+    while (sup && ratio <= 1 + 1e-6 && sup.length < maxLegs) {
+      let bSup = null, bRatio = ratio;
+      for (const e of available) {
+        if (sup.includes(e)) continue;
+        const r = solveSupport(feasCtx, sup.concat(e));
+        if (r && r.ratio > bRatio) { bRatio = r.ratio; bSup = sup.concat(e); }
+      }
+      if (!bSup) break;
+      sup = bSup;
+      ratio = bRatio;
+    }
+    if (sup && ratio > 1 + 1e-6) {
+      const res = solveSupport(ctx, sup);
+      if (res && res.targetExp > 1e-9) seed = { res, sup };
+    }
+  }
+  if (!seed) return null;
+
+  let support = seed.sup, cur = seed.res;
+
+  while (support.length < maxLegs) {
+    const cands = available.filter(e => !support.includes(e)).map(e => support.concat(e));
+    const nxt = evalBest(cands);
+    if (!nxt || !(scoreOf(nxt.res) > scoreOf(cur) * (1 + MIN_IMPROVE))) break;
+    support = nxt.sup;
+    cur = nxt.res;
+  }
+
+  // Prune untradeable slivers (<0.5% of capital) and re-solve once
+  const keep = support.filter((_, i) => Math.abs(cur.w[i]) >= 0.005);
+  if (keep.length > 0 && keep.length < support.length) {
+    const pruned = solveSupport(ctx, keep);
+    if (pruned && pruned.targetExp > 1e-9 && scoreOf(pruned) >= scoreOf(cur) * 0.99) {
+      support = keep;
+      cur = pruned;
+    }
+  }
+
+  return { support, w: cur.w, exp: cur.exp, targetExp: cur.targetExp,
+           gross: cur.gross, maxOther: cur.maxOther, ratio: cur.ratio };
 }
 
 function runOptimization() {
@@ -825,7 +1083,6 @@ function runOptimization() {
   }
 
   const cap = maxOtherPct / 100;
-  let best = null, bestScore = -Infinity;
 
   // ── Pre-compute typed arrays for fast inner-loop arithmetic ───────────
   // JS dict hash-map ops are ~10× slower than typed-array indexing.
@@ -854,96 +1111,55 @@ function runOptimization() {
     etfVecs[etf] = vec;
   }
 
-  // ETFs that contain the target — every valid combo needs ≥1 of these
-  // in a *long* direction; otherwise targetExp ≤ 0 and we skip anyway.
-  const targetEtfs = new Set(available.filter(etf => etfVecs[etf][targetI] > 0));
+  // ETFs that contain the target — the greedy search must seed from one
+  const targetEtfs = available.filter(etf => etfVecs[etf][targetI] > 0);
 
-  // Reusable accumulation buffer (avoids allocating per iteration)
-  const expArr = new Float64Array(N);
-
-  const kMax = Math.min(maxLegs, available.length);
-  for (let k = 1; k <= kMax; k++) {
-    for (const combo of combinations(available, k)) {
-      // Combo-level pre-filter: must include ≥1 ETF that has the target
-      if (!combo.some(etf => targetEtfs.has(etf))) continue;
-
-      const totalDirs = 1 << k;
-      for (let mask = 0; mask < totalDirs; mask++) {
-        // Direction-level pre-filter: at least one targetEtf must be long
-        let hasLongTarget = false;
-        for (let i = 0; i < k; i++) {
-          if (targetEtfs.has(combo[i]) && ((mask >> i) & 1)) { hasLongTarget = true; break; }
-        }
-        if (!hasLongTarget) continue;
-
-        // Build exposure vector via typed-array accumulation
-        expArr.fill(0);
-        for (let i = 0; i < k; i++) {
-          const scalar = ((mask >> i) & 1) ? (1 / k) : -(1 / k);
-          const vec    = etfVecs[combo[i]];
-          for (let j = 0; j < N; j++) expArr[j] += scalar * vec[j];
-        }
-
-        const targetExp = expArr[targetI];
-        if (targetExp <= 0) continue;
-        if (optimizeMode === 'absolute' && targetExp <= bestScore) continue;
-
-        // Feasibility sweep — single pass, track maxOther inline
-        let feasible = true, maxOther = 0;
-        for (let j = 0; j < N; j++) {
-          if (j === targetI) continue;
-          const absV = Math.abs(expArr[j]);
-          if (absV > cap + 1e-9) { feasible = false; break; }
-          if (requireMaxExp && absV > targetExp + 1e-9) { feasible = false; break; }
-          const t = tickers[j];
-          if (tickerCaps[t] !== undefined && absV > tickerCaps[t] + 1e-9) { feasible = false; break; }
-          if (absV > maxOther) maxOther = absV;
-        }
-
-        if (feasible) {
-          let score, ratio;
-          if (optimizeMode === 'relative') {
-            ratio = maxOther > 1e-9 ? targetExp / maxOther : Infinity;
-            score = maxOther > 1e-9 ? targetExp / maxOther : 1e9;
-          } else {
-            score = targetExp;
-            ratio = null;
-          }
-          if (score > bestScore) {
-            bestScore = score;
-            // Convert typed array back to plain object for rendering
-            const exp = {};
-            for (let j = 0; j < N; j++) {
-              if (Math.abs(expArr[j]) > 1e-9) exp[tickers[j]] = expArr[j];
-            }
-            best = { legs: combo.map((etf, i) => ({ etf, dir: ((mask >> i) & 1) ? 1 : -1 })), exp, targetExp, ratio };
-          }
-        }
-      }
-    }
+  // Per-ticker exposure limits: global cap, tightened by user overrides
+  const lims = new Float64Array(N).fill(cap);
+  for (const [tk, v] of Object.entries(tickerCaps)) {
+    const j = tickerIdx[tk];
+    if (j !== undefined) lims[j] = Math.min(cap, v);
   }
 
-  if (!best) {
+  const ctx = {
+    etfVecs, tickers, tickerIdx, N, targetI, lims,
+    mode: optimizeMode, cap, requireMax: requireMaxExp,
+    scratch: new Float64Array(N),
+  };
+
+  const result = optimizeContinuous(ctx, available, targetEtfs, maxLegs);
+
+  if (!result || result.targetExp <= 1e-9) {
     errEl.textContent = `No feasible portfolio found for ${target} with those constraints. Try increasing "Max Other Exposure" or "Max Legs".`;
     errEl.classList.remove('hidden');
     return;
   }
 
-  renderOptResults(best, target, maxOtherPct, portfolio);
+  const legs = result.support
+    .map((etf, i) => ({ etf, dir: result.w[i] >= 0 ? 1 : -1, weight: Math.abs(result.w[i]) }))
+    .filter(l => l.weight > 1e-9);
+  const exp = {};
+  for (let j = 0; j < N; j++) {
+    if (Math.abs(result.exp[j]) > 1e-9) exp[tickers[j]] = result.exp[j];
+  }
+
+  renderOptResults(
+    { legs, exp, targetExp: result.targetExp, ratio: result.ratio, gross: result.gross },
+    target, maxOtherPct, portfolio
+  );
 }
 
 function renderOptResults(result, target, maxOtherPct, portfolio) {
-  const k = result.legs.length;
-  const legDollars = portfolio / k;
+  const legsData = result.legs.map(l => ({ ...l, dollars: l.weight * portfolio }));
 
   // Store for porting to Historical Spread tab
-  lastOptLegs = result.legs.map(l => ({ etf: l.etf, dir: l.dir > 0 ? 'long' : 'short', dollars: legDollars }));
+  lastOptLegs = legsData.map(l => ({ etf: l.etf, dir: l.dir > 0 ? 'long' : 'short', dollars: l.dollars }));
 
-  const legsHtml = result.legs.map(l => {
+  const legsHtml = legsData.map(l => {
     const dir      = l.dir > 0 ? 'long' : 'short';
     const dirLabel = l.dir > 0 ? '↑ Long' : '↓ Short';
     const price    = priceCache[l.etf];
-    const shares   = price ? Math.round(legDollars / price) : null;
+    const shares   = price ? Math.round(l.dollars / price) : null;
     const sharesStr = shares !== null
       ? `<span class="opt-leg-shares">≈ ${shares.toLocaleString()} shares @ $${price.toFixed(2)}</span>`
       : '';
@@ -953,15 +1169,51 @@ function renderOptResults(result, target, maxOtherPct, portfolio) {
         <span class="opt-leg-dir">${dirLabel}</span>
         <span class="opt-leg-ticker">${escHtml(l.etf)}</span>
       </div>
-      <div class="opt-leg-amount">${fmtMoney(legDollars)}</div>
+      <div class="opt-leg-amount">${fmtMoney(l.dollars)}</div>
+      <span class="opt-leg-weight">${(l.weight * 100).toFixed(1)}% of capital</span>
       ${sharesStr}
     </div>`;
   }).join('');
+
+  // Cash chip when the solver leaves capital undeployed (caps bind first)
+  const cash = Math.max(0, 1 - (result.gross ?? 1));
+  const cashHtml = cash > 0.005 ? `
+    <div class="opt-leg cash">
+      <div class="opt-leg-top">
+        <span class="opt-leg-dir">◦ Uninvested</span>
+        <span class="opt-leg-ticker">CASH</span>
+      </div>
+      <div class="opt-leg-amount">${fmtMoney(cash * portfolio)}</div>
+      <span class="opt-leg-weight">${(cash * 100).toFixed(1)}% of capital</span>
+    </div>` : '';
 
   const targetPct  = (result.targetExp * 100).toFixed(2);
   const ratioLabel = result.ratio != null && isFinite(result.ratio)
     ? `<div class="card-ratio">${result.ratio.toFixed(2)}× nearest holding</div>`
     : '';
+
+  // Residual summary — how much of the result is the thing asked for
+  const unwanted = Object.entries(result.exp)
+    .reduce((s, [t, v]) => t === target ? s : s + Math.abs(v), 0);
+  const purity = result.targetExp + unwanted > 0
+    ? result.targetExp / (result.targetExp + unwanted)
+    : 0;
+  const summaryHtml = `
+    <div class="opt-summary">
+      <div class="opt-summary-item">
+        <div class="v">${(purity * 100).toFixed(0)}%</div>
+        <div class="l">purity — share of gross stock exposure that is ${escHtml(target)}</div>
+      </div>
+      <div class="opt-summary-item">
+        <div class="v">${(unwanted * 100).toFixed(2)}%</div>
+        <div class="l">unwanted — all off-target exposure combined</div>
+      </div>
+      ${cash > 0.005 ? `
+      <div class="opt-summary-item">
+        <div class="v">${(cash * 100).toFixed(1)}%</div>
+        <div class="l">cash — undeployed, caps bind before capital runs out</div>
+      </div>` : ''}
+    </div>`;
 
   const rows = Object.entries(result.exp)
     .map(([ticker, v]) => ({ ticker, pct: v * 100 }))
@@ -985,12 +1237,13 @@ function renderOptResults(result, target, maxOtherPct, portfolio) {
   }).join('');
 
   document.getElementById('optResultsContent').innerHTML = `
-    <div class="opt-legs-row">${legsHtml}</div>
+    <div class="opt-legs-row">${legsHtml}${cashHtml}</div>
     <div class="opt-target-card">
-      <div class="card-label">${escHtml(target)} Exposure (equal-weighted)</div>
+      <div class="card-label">${escHtml(target)} Exposure (optimized weights)</div>
       <div class="card-value">+${targetPct}%</div>
       ${ratioLabel}
     </div>
+    ${summaryHtml}
     <p class="opt-constraint-note">${rows.length - 1} other stock${rows.length - 1 !== 1 ? 's' : ''} capped at ≤${maxOtherPct}% · ${result.legs.length} leg${result.legs.length !== 1 ? 's' : ''}</p>
     <div class="exp-chart">${chartRows}</div>
     <button class="btn btn-secondary" id="portToHistBtn" style="margin-top:1.25rem">→ Simulate in Historical Spread</button>`;

@@ -840,6 +840,38 @@ td:first-child { color: var(--muted); font-size: 0.8rem; }
   color: var(--muted);
 }
 
+.opt-leg-weight {
+  display: block;
+  font-size: 0.72rem;
+  color: var(--muted);
+  margin-bottom: 0.1rem;
+}
+
+.opt-leg.cash { border-style: dashed; }
+.opt-leg.cash .opt-leg-dir,
+.opt-leg.cash .opt-leg-ticker,
+.opt-leg.cash .opt-leg-amount { color: var(--muted); }
+
+/* ── Residual summary strip ── */
+.opt-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem 2.25rem;
+  margin-bottom: 1.1rem;
+}
+
+.opt-summary-item .v {
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.opt-summary-item .l {
+  font-size: 0.72rem;
+  color: var(--muted);
+  max-width: 250px;
+}
+
 .input-prefix-wrap { position: relative; }
 .input-prefix {
   position: absolute;
